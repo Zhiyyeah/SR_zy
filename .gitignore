@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+WaterLand_TOA_tiles_VIS/
+*WaterLand_TOA*/
+WaterLand_unzipped/
+
+
+# 忽略所有 .tar 文件
+*.tar
+
+# 忽略所有 .tif 文件
+*.tif
+*.TIF
+
+
+# 日志文件
+*.log
+
+# 输出目录
+outputs/
+
+# IDE相关
+.vscode/
+.idea/
+
+# 环境文件
+.env
+venv/
+env/
+
+# 系统文件
+.DS_Store
+Thumbs.db 

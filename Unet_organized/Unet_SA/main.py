@@ -16,10 +16,10 @@ from model_io import save_model, load_model
 
 # ====================== 配置参数 ======================
 # (配置参数部分保持不变，此处省略以保持简洁)
-experiment_name = 'best_of_500_bs_256' # 可以更新实验名
+experiment_name = 'zy_first' # 可以更新实验名
 # 数据设置
-lr_dir = '/public/home/zyye/SR_backup/Imagery/Water_TOA_tiles_lr'  # 低分辨率图像路径
-hr_dir = '/public/home/zyye/SR_backup/Imagery/Water_TOA_tiles'  # 高分辨率图像路径
+lr_dir = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Imagery_WaterLand\WaterLand_TOA_tiles_lr"
+hr_dir = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Imagery_WaterLand\WaterLand_TOA_tiles_hr"
 train_ratio = 0.8
 
 # 模型设置
@@ -27,7 +27,7 @@ up_scale = 8
 width = 64
 
 # 训练设置
-batch_size = 256
+batch_size = 16
 num_workers = 4
 pin_memory = True
 seed = 42

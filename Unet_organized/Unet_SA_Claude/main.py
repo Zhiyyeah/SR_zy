@@ -2,350 +2,378 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
 from tqdm import tqdm
 import numpy as np
 import time
-import json
 import matplotlib.pyplot as plt
 
 # 导入本地模块
-from model_attention import UNetSA
+from model_attention_improved import UNetSAImproved  # 使用改进的模型
 from data_loader import create_train_test_dataloaders
 from metrics import psnr, compute_ssim
-from utils import visualize_results, save_plots, get_device
+from utils import visualize_results, save_plots, save_metrics_to_file, get_device
+from model_io import save_model, load_model
 
 # ====================== 配置参数 ======================
-class Config:
-    """训练配置类"""
-    # 实验设置
-    experiment_name = 'zy_computer_1'
-    
-    # 数据路径
-    lr_dir = 'SR_zy/Imagey/Imagery_WaterLand/WaterLand_TOA_tiles_lr'
-    hr_dir = 'SR_zy/Imagey/Imagery_WaterLand/WaterLand_TOA_tiles_hr'
-    train_ratio = 0.8
-    
-    # 模型参数
-    up_scale = 8
-    width = 32
-    dropout_rate = 0.1
-    num_channels = 7
-    
-    # 训练参数
-    batch_size = 8
-    epochs = 200
-    learning_rate = 1e-4
-    weight_decay = 1e-5
-    
-    # 系统设置
-    num_workers = 4
-    pin_memory = True
-    seed = 42
-    device = get_device()
-    
-    # 输出设置
-    output_dir = './outputs'
-    save_interval = 1
-    
-    # 可视化设置
-    rgb_channels = [3, 2, 1]
+experiment_name = 'improved_model_v2'
 
+# 数据设置
+lr_dir = r'D:\Py_Code\Unet_SR\SR_zy\Imagey\Small_Dataset\lr'
+hr_dir = r'D:\Py_Code\Unet_SR\SR_zy\Imagey\Small_Dataset\hr'
+train_ratio = 0.8
 
-# ====================== 训练函数 ======================
-def train_one_epoch(model, dataloader, criterion, optimizer, device):
-    """训练一个epoch"""
+# 模型设置
+up_scale = 8
+width = 64
+dropout_rate = 0.15  # Dropout率
+use_deep_supervision = True  # 是否使用深度监督
+
+# 训练设置
+batch_size = 16
+num_workers = 4
+pin_memory = True
+seed = 42
+epochs = 100
+learning_rate = 0.001  # 初始学习率（会使用学习率调度器）
+weight_decay = 1e-4  # L2正则化
+gradient_clip = 1.0  # 梯度裁剪
+
+# 学习率调度器设置
+scheduler_type = 'cosine'  # 'plateau' or 'cosine'
+warmup_epochs = 5  # 预热轮次
+
+# 设备设置
+device = get_device()
+
+# 输出设置
+output_dir = './outputs'
+save_interval = 5  # 每5轮保存一次
+patience = 15  # 早停耐心值
+
+# 可视化设置
+rgb_channels = [3, 2, 1]
+
+# ====================== 辅助函数 ======================
+
+class CombinedLoss(nn.Module):
+    """组合损失函数：MSE + Perceptual-like loss"""
+    def __init__(self, alpha=0.9, beta=0.1):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.mse = nn.MSELoss()
+        self.l1 = nn.L1Loss()
+    
+    def forward(self, pred, target):
+        mse_loss = self.mse(pred, target)
+        l1_loss = self.l1(pred, target)
+        return self.alpha * mse_loss + self.beta * l1_loss
+
+def get_lr(optimizer):
+    """获取当前学习率"""
+    for param_group in optimizer.param_groups:
+        return param_group['lr']
+
+def train_epoch(model, dataloader, criterion, optimizer, epoch, warmup_epochs):
+    """训练一个轮次"""
     model.train()
+    running_loss = 0.0
+    running_psnr = 0.0
+    running_ssim = 0.0
+    total_samples = 0
+
+    loop = tqdm(enumerate(dataloader), total=len(dataloader), ncols=100)
     
-    # 初始化指标
-    total_loss = 0.0
-    total_psnr = 0.0
-    total_ssim = 0.0
-    num_batches = len(dataloader)
-    
-    # 进度条
-    progress_bar = tqdm(dataloader, desc="训练中", ncols=100)
-    
-    for batch_idx, (lr_imgs, hr_imgs) in enumerate(progress_bar):
-        # 数据移到GPU
-        lr_imgs = lr_imgs.to(device)
-        hr_imgs = hr_imgs.to(device)
+    # 学习率预热
+    if epoch < warmup_epochs:
+        warmup_factor = (epoch + 1) / warmup_epochs
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = learning_rate * warmup_factor
+
+    for i, data in loop:
+        lr_imgs = data[0].to(device)
+        hr_imgs = data[1].to(device)
+        current_batch_size = lr_imgs.size(0)
+        total_samples += current_batch_size
+
+        optimizer.zero_grad()
         
         # 前向传播
-        optimizer.zero_grad()
-        sr_imgs = model(lr_imgs)
-        loss = criterion(sr_imgs, hr_imgs)
+        outputs = model(lr_imgs)
         
-        # 反向传播
+        # 处理深度监督
+        if use_deep_supervision and isinstance(outputs, tuple):
+            sr_imgs, aux_output = outputs
+            # 主损失 + 辅助损失
+            main_loss = criterion(sr_imgs, hr_imgs)
+            aux_loss = criterion(aux_output, hr_imgs)
+            loss = 0.8 * main_loss + 0.2 * aux_loss
+        else:
+            sr_imgs = outputs
+            loss = criterion(sr_imgs, hr_imgs)
+        
         loss.backward()
+        
+        # 梯度裁剪
+        if gradient_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+        
         optimizer.step()
-        
-        # 计算指标
+
+        running_loss += loss.item() * current_batch_size
         batch_psnr = psnr(hr_imgs, sr_imgs)
+        running_psnr += batch_psnr * current_batch_size
         batch_ssim = compute_ssim(hr_imgs, sr_imgs)
-        
-        # 累积指标
-        total_loss += loss.item()
-        total_psnr += batch_psnr
-        total_ssim += batch_ssim
-        
-        # 更新进度条
-        progress_bar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'psnr': f'{batch_psnr:.2f}',
-            'ssim': f'{batch_ssim:.4f}'
-        })
-    
-    # 计算平均指标
+        running_ssim += batch_ssim * current_batch_size
+
+        loop.set_description(f"训练轮次 {epoch+1}")
+        loop.set_postfix(loss=loss.item(), psnr=batch_psnr, ssim=batch_ssim, lr=get_lr(optimizer))
+
+    epoch_loss = running_loss / total_samples if total_samples > 0 else 0
+    epoch_psnr = running_psnr / total_samples if total_samples > 0 else 0
+    epoch_ssim = running_ssim / total_samples if total_samples > 0 else 0
+
     avg_metrics = {
-        'loss': total_loss / num_batches,
-        'psnr': total_psnr / num_batches,
-        'ssim': total_ssim / num_batches
+        'loss': epoch_loss,
+        'psnr': epoch_psnr,
+        'ssim': epoch_ssim
     }
-    
+
     return avg_metrics
 
-
-def evaluate_model(model, dataloader, criterion, device):
-    """评估模型"""
+def test_model(model, test_loader, criterion, device):
+    """测试模型"""
     model.eval()
-    
-    # 初始化指标
-    total_loss = 0.0
-    total_psnr = 0.0
-    total_ssim = 0.0
-    num_batches = len(dataloader)
-    
-    # 进度条
-    progress_bar = tqdm(dataloader, desc="测试中", ncols=100)
-    
+    running_loss = 0.0
+    running_psnr = 0.0
+    running_ssim = 0.0
+    total_samples = 0
+
+    print(f"测试模型，共 {len(test_loader.dataset)} 张图像...")
     with torch.no_grad():
-        for lr_imgs, hr_imgs in progress_bar:
-            # 数据移到GPU
+        for i, data in enumerate(tqdm(test_loader, desc="测试中", ncols=100)):
+            lr_imgs, hr_imgs = data
             lr_imgs = lr_imgs.to(device)
             hr_imgs = hr_imgs.to(device)
-            
-            # 前向传播
+            batch_size = lr_imgs.size(0)
+            total_samples += batch_size
+
+            # 前向推理
             sr_imgs = model(lr_imgs)
-            loss = criterion(sr_imgs, hr_imgs)
             
-            # 计算指标
+            # 测试时不使用深度监督
+            if isinstance(sr_imgs, tuple):
+                sr_imgs = sr_imgs[0]
+
+            # 计算损失和指标
+            batch_loss = criterion(sr_imgs, hr_imgs)
+            running_loss += batch_loss.item() * batch_size
+
             batch_psnr = psnr(hr_imgs, sr_imgs)
+            running_psnr += batch_psnr * batch_size
+
             batch_ssim = compute_ssim(hr_imgs, sr_imgs)
-            
-            # 累积指标
-            total_loss += loss.item()
-            total_psnr += batch_psnr
-            total_ssim += batch_ssim
-            
-            # 更新进度条
-            progress_bar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'psnr': f'{batch_psnr:.2f}',
-                'ssim': f'{batch_ssim:.4f}'
-            })
-    
+            running_ssim += batch_ssim * batch_size
+
     # 计算平均指标
+    epoch_loss = running_loss / total_samples if total_samples > 0 else 0.0
+    epoch_psnr = running_psnr / total_samples if total_samples > 0 else 0.0
+    epoch_ssim = running_ssim / total_samples if total_samples > 0 else 0.0
+
     avg_metrics = {
-        'loss': total_loss / num_batches,
-        'psnr': total_psnr / num_batches,
-        'ssim': total_ssim / num_batches
+        'loss': epoch_loss,
+        'psnr': epoch_psnr,
+        'ssim': epoch_ssim
     }
-    
+
     return avg_metrics
 
-
-def save_checkpoint(model, optimizer, epoch, metrics, save_path):
-    """保存模型检查点"""
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'metrics': metrics
-    }
-    torch.save(checkpoint, save_path)
-
-
-def create_loss_function():
-    """创建混合损失函数"""
-    l1_criterion = nn.L1Loss()
-    mse_criterion = nn.MSELoss()
+def train_and_test():
+    """训练并测试模型"""
     
-    def mixed_loss(pred, target):
-        return 0.7 * l1_criterion(pred, target) + 0.3 * mse_criterion(pred, target)
-    
-    return mixed_loss
-
-
-def print_training_info(config):
-    """打印训练信息"""
-    print("="*60)
-    print("超分辨率模型训练")
-    print("="*60)
-    
-    print("\n📊 训练配置:")
-    print(f"  • 实验名称: {config.experiment_name}")
-    print(f"  • 上采样倍数: {config.up_scale}x")
-    print(f"  • 模型宽度: {config.width}")
-    print(f"  • 批次大小: {config.batch_size}")
-    print(f"  • 训练轮数: {config.epochs}")
-    print(f"  • 学习率: {config.learning_rate}")
-    print(f"  • 权重衰减: {config.weight_decay}")
-    
-    print("\n💻 系统信息:")
-    if torch.cuda.is_available():
-        print(f"  • 使用设备: {torch.cuda.get_device_name(0)}")
-        device_props = torch.cuda.get_device_properties(0)
-        print(f"  • GPU内存: {device_props.total_memory / 1024**3:.1f} GB")
-    else:
-        print("  • 使用设备: CPU")
-
-
-# ====================== 主训练函数 ======================
-def train():
-    """主训练函数"""
-    # 加载配置
-    config = Config()
-    
-    # 设置随机种子
-    torch.manual_seed(config.seed)
-    np.random.seed(config.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(config.seed)
-    
-    # 打印训练信息
-    print_training_info(config)
-    
-    # 创建输出目录
-    experiment_dir = os.path.join(config.output_dir, config.experiment_name)
+    # 保存路径
+    experiment_dir = os.path.join(output_dir, f"{experiment_name}_lr{learning_rate}_wd{weight_decay}")
     model_dir = os.path.join(experiment_dir, 'models')
+    test_results_dir = os.path.join(experiment_dir, 'test_results')
     plots_dir = os.path.join(experiment_dir, 'plots')
     
-    for dir_path in [experiment_dir, model_dir, plots_dir]:
+    # 创建保存路径
+    for dir_path in [experiment_dir, model_dir, test_results_dir, plots_dir]:
         os.makedirs(dir_path, exist_ok=True)
-    
+
     # 保存配置
-    config_dict = {k: v for k, v in vars(config).items() if not k.startswith('_')}
-    with open(os.path.join(experiment_dir, 'config.json'), 'w') as f:
-        json.dump(config_dict, f, indent=4, default=str)
-    
+    config_path = os.path.join(experiment_dir, 'config.txt')
+    with open(config_path, 'w') as f:
+        f.write(f"实验名称: {experiment_name}\n")
+        f.write(f"学习率: {learning_rate}\n")
+        f.write(f"权重衰减: {weight_decay}\n")
+        f.write(f"Dropout率: {dropout_rate}\n")
+        f.write(f"批次大小: {batch_size}\n")
+        f.write(f"轮次数: {epochs}\n")
+        f.write(f"梯度裁剪: {gradient_clip}\n")
+        f.write(f"调度器类型: {scheduler_type}\n")
+        f.write(f"深度监督: {use_deep_supervision}\n")
+
     # 创建数据加载器
-    print("\n📁 加载数据...")
     train_loader, test_loader = create_train_test_dataloaders(
-        config.lr_dir, 
-        config.hr_dir, 
-        config.batch_size, 
-        config.train_ratio, 
-        config.seed, 
-        config.num_workers, 
-        config.pin_memory
+        lr_dir, hr_dir, batch_size, train_ratio, seed, num_workers, pin_memory
     )
-    print(f"  • 训练集: {len(train_loader.dataset)} 张图像")
-    print(f"  • 测试集: {len(test_loader.dataset)} 张图像")
-    
-    # 创建模型
-    print("\n🔧 创建模型...")
-    model = UNetSA(
-        up_scale=config.up_scale,
-        img_channel=config.num_channels,
-        width=config.width,
-        dropout_rate=config.dropout_rate,
-        use_attention=True
-    ).to(config.device)
+    print(f"训练集样本数: {len(train_loader.dataset)}")
+    print(f"测试集样本数: {len(test_loader.dataset)}")
+
+    num_channels = 7
+
+    # 创建改进的模型
+    model = UNetSAImproved(
+        up_scale=up_scale, 
+        img_channel=num_channels, 
+        width=width,
+        dropout_rate=dropout_rate,
+        deep_supervision=use_deep_supervision
+    ).to(device)
     
     num_params = sum(p.numel() for p in model.parameters())
-    print(f"  • 模型参数量: {num_params:,}")
-    
+    print(f"模型创建完成，共 {num_params:,} 个参数")
+
     # 创建优化器和损失函数
-    optimizer = optim.AdamW(
-        model.parameters(), 
-        lr=config.learning_rate, 
-        weight_decay=config.weight_decay
-    )
-    criterion = create_loss_function()
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=(0.9, 0.999))
+    criterion = CombinedLoss(alpha=0.9, beta=0.1)  # 组合损失
     
-    # 训练历史记录
-    train_history = {'loss': [], 'psnr': [], 'ssim': []}
+    # 创建学习率调度器
+    if scheduler_type == 'plateau':
+        scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True, min_lr=1e-6)
+    elif scheduler_type == 'cosine':
+        scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
+    
+    # 训练前准备
+    train_history = {'loss': [], 'psnr': [], 'ssim': [], 'lr': []}
     test_history = {'loss': [], 'psnr': [], 'ssim': []}
     best_test_psnr = 0.0
-    best_epoch = 0
-    
-    # 开始训练
-    print("\n🚀 开始训练...")
-    start_time = time.time()
-    
-    for epoch in range(1, config.epochs + 1):
-        print(f"\n轮次 {epoch}/{config.epochs}")
+    best_test_ssim = 0.0
+    no_improve_count = 0
+
+    print(f"\n开始训练，共 {epochs} 个轮次...")
+    total_training_start_time = time.time()
+
+    for epoch in range(epochs):
+        epoch_start_time = time.time()
+        print(f"\n📘 轮次 {epoch+1}/{epochs}")
         
-        # 训练一个epoch
-        train_metrics = train_one_epoch(model, train_loader, criterion, optimizer, config.device)
-        print(f"训练 - Loss: {train_metrics['loss']:.4f}, "
-              f"PSNR: {train_metrics['psnr']:.2f} dB, "
-              f"SSIM: {train_metrics['ssim']:.4f}")
+        # 训练
+        train_metrics = train_epoch(model, train_loader, criterion, optimizer, epoch, warmup_epochs)
+        for k, v in train_metrics.items():
+            train_history[k].append(v)
+        train_history['lr'].append(get_lr(optimizer))
         
-        # 评估模型
-        test_metrics = evaluate_model(model, test_loader, criterion, config.device)
-        print(f"测试 - Loss: {test_metrics['loss']:.4f}, "
-              f"PSNR: {test_metrics['psnr']:.2f} dB, "
-              f"SSIM: {test_metrics['ssim']:.4f}")
+        print(f"训练 - Loss: {train_metrics['loss']:.4f}, PSNR: {train_metrics['psnr']:.2f}, SSIM: {train_metrics['ssim']:.4f}")
+
+        # 测试
+        test_metrics = test_model(model, test_loader, criterion, device)
+        for k, v in test_metrics.items():
+            test_history[k].append(v)
         
-        # 记录历史
-        for key in ['loss', 'psnr', 'ssim']:
-            train_history[key].append(train_metrics[key])
-            test_history[key].append(test_metrics[key])
-        
+        print(f"测试 - Loss: {test_metrics['loss']:.4f}, PSNR: {test_metrics['psnr']:.2f}, SSIM: {test_metrics['ssim']:.4f}")
+
+        # 学习率调度
+        if scheduler_type == 'plateau':
+            scheduler.step(test_metrics['psnr'])
+        elif scheduler_type == 'cosine':
+            scheduler.step()
+
+        # 保存训练曲线
+        save_plots(train_history, test_history, plots_dir)
+
+        # 定期保存模型
+        if (epoch + 1) % save_interval == 0:
+            save_model(model, model_dir, f"epoch_{epoch+1}.pth", train_metrics)
+            print(f"已保存轮次 {epoch+1} 的模型")
+
         # 保存最佳模型
         if test_metrics['psnr'] > best_test_psnr:
             best_test_psnr = test_metrics['psnr']
-            best_epoch = epoch
-            save_checkpoint(
-                model, optimizer, epoch, test_metrics,
-                os.path.join(model_dir, 'best_model.pth')
-            )
-            print(f"✨ 保存最佳模型 (PSNR: {best_test_psnr:.2f} dB)")
-        
-        # 定期保存检查点
-        if epoch % config.save_interval == 0:
-            save_checkpoint(
-                model, optimizer, epoch, test_metrics,
-                os.path.join(model_dir, f'checkpoint_epoch_{epoch}.pth')
-            )
+            save_model(model, model_dir, "best_psnr_model.pth", test_metrics)
+            print(f"✨ 新的最佳PSNR: {best_test_psnr:.4f}")
+            no_improve_count = 0
+        else:
+            no_improve_count += 1
             
-            # 保存训练曲线
-            save_plots(train_history, test_history, plots_dir)
-    
-    # 训练完成
-    end_time = time.time()
-    training_time = end_time - start_time
-    hours = int(training_time // 3600)
-    minutes = int((training_time % 3600) // 60)
-    seconds = training_time % 60
-    
-    print("\n✅ 训练完成!")
-    print(f"  • 总耗时: {hours}小时 {minutes}分钟 {seconds:.0f}秒")
-    print(f"  • 最佳模型: 第 {best_epoch} 轮 (PSNR: {best_test_psnr:.2f} dB)")
-    
+        if test_metrics['ssim'] > best_test_ssim:
+            best_test_ssim = test_metrics['ssim']
+            save_model(model, model_dir, "best_ssim_model.pth", test_metrics)
+            print(f"✨ 新的最佳SSIM: {best_test_ssim:.4f}")
+
+        # 早停检查
+        if no_improve_count >= patience:
+            print(f"\n⚠️ 早停触发：{patience}轮未改善")
+            break
+
+        epoch_time = time.time() - epoch_start_time
+        print(f"轮次耗时: {epoch_time:.2f}秒")
+
+    total_time = time.time() - total_training_start_time
+    print(f"\n🎉 训练完成! 总耗时: {total_time//3600:.0f}h {(total_time%3600)//60:.0f}m {total_time%60:.0f}s")
+
     # 保存最终模型
-    save_checkpoint(
-        model, optimizer, config.epochs, test_metrics,
-        os.path.join(model_dir, 'final_model.pth')
-    )
+    save_model(model, model_dir, "final_model.pth", train_metrics)
     
-    # 保存训练总结
-    summary = {
-        'total_epochs': config.epochs,
-        'best_epoch': best_epoch,
-        'best_test_psnr': best_test_psnr,
-        'final_test_metrics': test_metrics,
-        'training_time_seconds': training_time,
-        'model_parameters': num_params
-    }
+    # 加载最佳模型进行最终测试
+    print("\n📊 加载最佳模型进行最终测试...")
+    best_model_path = os.path.join(model_dir, "best_psnr_model.pth")
+    if os.path.exists(best_model_path):
+        load_model(model, best_model_path, device)
+        print(f"已加载最佳PSNR模型")
     
-    with open(os.path.join(experiment_dir, 'training_summary.json'), 'w') as f:
-        json.dump(summary, f, indent=4)
+    final_test_metrics = test_model(model, test_loader, criterion, device)
     
-    return model, test_metrics
+    # 保存最终结果
+    results_path = os.path.join(experiment_dir, 'final_results.txt')
+    with open(results_path, 'w') as f:
+        f.write(f"最终测试结果:\n")
+        f.write(f"Loss: {final_test_metrics['loss']:.6f}\n")
+        f.write(f"PSNR: {final_test_metrics['psnr']:.4f}\n")
+        f.write(f"SSIM: {final_test_metrics['ssim']:.4f}\n")
+        f.write(f"最佳PSNR: {best_test_psnr:.4f}\n")
+        f.write(f"最佳SSIM: {best_test_ssim:.4f}\n")
+        f.write(f"总训练时间: {total_time//3600:.0f}h {(total_time%3600)//60:.0f}m\n")
+
+    return model, final_test_metrics
+
+# ====================== 主函数 ======================
+def main():
+    """主函数"""
+    print("🚀 GPU 可用:", torch.cuda.is_available())
+
+    if torch.cuda.is_available():
+        print("🧠 当前使用的 GPU 数量:", torch.cuda.device_count())
+        print("📍 当前默认设备:", torch.cuda.current_device())
+        print("💻 当前设备名称:", torch.cuda.get_device_name(torch.cuda.current_device()))
+        
+        # 简洁版内存信息
+        device = torch.cuda.current_device()
+        total_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+        used_gb = torch.cuda.memory_allocated(device) / (1024**3)
+        print(f"💾 GPU 内存: {used_gb:.2f}/{total_gb:.2f} GB ({used_gb/total_gb*100:.1f}%)")
+    else:
+        print("⚠️ 当前使用 CPU")
+    
+    print("\n📋 配置:")
+    print(f"  实验名称: {experiment_name}")
+    print(f"  数据目录: LR='{lr_dir}', HR='{hr_dir}'")
+    print(f"  模型参数: width={width}, up_scale={up_scale}, dropout={dropout_rate}")
+    print(f"  训练参数: batch_size={batch_size}, epochs={epochs}")
+    print(f"  优化器: AdamW(lr={learning_rate}, weight_decay={weight_decay})")
+    print(f"  调度器: {scheduler_type}")
+    print(f"  深度监督: {use_deep_supervision}")
+    print(f"  梯度裁剪: {gradient_clip}")
+    print(f"  输出目录: {os.path.join(output_dir, f'{experiment_name}_lr{learning_rate}_wd{weight_decay}')}")
+
+    print("\n🚀 开始训练和测试...")
+    _, final_metrics = train_and_test()
+
+    print("\n✅ 训练和测试完成!")
+    print(f"最终测试集结果: Loss={final_metrics['loss']:.4f}, PSNR={final_metrics['psnr']:.4f}, SSIM={final_metrics['ssim']:.4f}")
 
 
-# ====================== 程序入口 ======================
 if __name__ == "__main__":
-    model, final_metrics = train()
+    main()

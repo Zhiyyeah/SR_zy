@@ -17,10 +17,10 @@ from utils import visualize_results, save_plots, save_metrics_to_file, get_devic
 from model_io import save_model, load_model
 
 # ====================== 配置参数 ======================
-experiment_name = 'improved_training_no_overfit_2'  # 更新实验名
+experiment_name = 'zy_computer_1'  # 更新实验名
 # 数据设置
-lr_dir = '/public/home/zyye/SR_backup/Imagery/Water_TOA_tiles_lr'  # 低分辨率图像路径
-hr_dir = '/public/home/zyye/SR_backup/Imagery/Water_TOA_tiles'  # 高分辨率图像路径
+lr_dir = 'SR_zy/Imagey/Imagery_WaterLand/WaterLand_TOA_tiles_lr'  # 低分辨率图像路径
+hr_dir = 'SR_zy/Imagey/Imagery_WaterLand/WaterLand_TOA_tiles_hr'  # 高分辨率图像路径
 train_ratio = 0.8
 
 # 模型设置

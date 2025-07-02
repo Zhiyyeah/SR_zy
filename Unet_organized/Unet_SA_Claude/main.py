@@ -34,7 +34,7 @@ class Config:
     # 训练参数
     batch_size = 8
     epochs = 200
-    learning_rate = 3e-4
+    learning_rate = 1e-4
     weight_decay = 1e-5
     
     # 系统设置

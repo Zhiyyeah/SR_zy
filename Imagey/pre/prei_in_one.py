@@ -12,7 +12,7 @@ from rasterio.enums import Resampling
 
 # ========== 用户配置 ==========
 # 原始 .tar 文件所在目录
-TAR_DIR = '/public/home/zyye/SR_organized/Imagey'
+TAR_DIR = 'SR_zy\Imagey\Imagery_WaterLand'
 
 IMG_DIR = TAR_DIR
 
@@ -163,10 +163,11 @@ def tile_hr():
 def tile_lr():
     """对 HR_TILES_DIR 中每个切片降采样 SCALE 倍，存到 LR_TILES_DIR"""
     os.makedirs(LR_TILES_DIR, exist_ok=True)
+    files = [fname for fname in os.listdir(HR_TILES_DIR) if fname.lower().endswith('.tif')]
+    total_files = len(files)
     cnt = 0
-    for fname in os.listdir(HR_TILES_DIR):
-        if not fname.lower().endswith('.tif'):
-            continue
+    for idx, fname in enumerate(files, 1):
+        print(f"正在处理第 {idx}/{total_files} 个文件：{fname}")
         hr_path = os.path.join(HR_TILES_DIR, fname)
         lr_path = os.path.join(LR_TILES_DIR, fname)
         with rasterio.open(hr_path) as src:
@@ -188,7 +189,7 @@ def tile_lr():
             with rasterio.open(lr_path, 'w', **meta) as dst:
                 dst.write(data)
         cnt += 1
-        
+    
     print(f"\n✅ 共生成 LR 切片 {cnt} 张 至：{LR_TILES_DIR}")
 
 if __name__ == '__main__':

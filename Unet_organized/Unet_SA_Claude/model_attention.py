@@ -40,21 +40,28 @@ class DoubleConvBlock(nn.Module):
         self.conv1 = SimpleConvBlock(in_channels, out_channels, dropout_rate=dropout_rate)
         self.conv2 = SimpleConvBlock(out_channels, out_channels, dropout_rate=dropout_rate)
         
-        # 残差连接
-        self.residual = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+        # 残差连接 - 修复：只有在通道数相同时才使用残差连接
+        self.use_residual = in_channels == out_channels
+        if not self.use_residual:
+            self.residual = nn.Conv2d(in_channels, out_channels, kernel_size=1)
         
         self.use_attention = use_attention
         if use_attention:
             self.attention = SpatialAttention()
 
     def forward(self, x):
-        identity = self.residual(x)
+        identity = x
+        if not self.use_residual:
+            identity = self.residual(x)
+        
         x = self.conv1(x)
         x = self.conv2(x)
+        
         if self.use_attention:
             x = self.attention(x)
-        # 残差连接
-        x = x + identity
+        
+        # 残差连接 - 使用更小的权重避免梯度爆炸
+        x = x + 0.1 * identity
         return x
 
 class DownBlock(nn.Module):
@@ -103,56 +110,54 @@ class PixelShuffleBlock(nn.Module):
 
 class UNetSA(nn.Module):
     """修复后的UNet超分辨率模型"""
-    def __init__(self, up_scale=8, img_channel=7, width=32, use_attention=True, dropout_rate=0.1):
+    def __init__(self, up_scale=8, img_channel=7, width=32, use_attention=True, dropout_rate=0.05):
         super().__init__()
         self.up_scale = up_scale
         self.use_attention = use_attention
         
-        # 初始卷积
+        # 初始卷积 - 减少dropout
         self.input_conv = DoubleConvBlock(img_channel, width, use_attention=False, dropout_rate=0)
         
-        # 编码器
+        # 编码器 - 减少dropout率
         self.down1 = DownBlock(width, width*2, use_attention=False, dropout_rate=dropout_rate*0.5)
         self.down2 = DownBlock(width*2, width*4, use_attention=use_attention, dropout_rate=dropout_rate)
-        self.down3 = DownBlock(width*4, width*8, use_attention=use_attention, dropout_rate=dropout_rate*1.5)
-        self.down4 = DownBlock(width*8, width*8, use_attention=use_attention, dropout_rate=dropout_rate*2)
+        self.down3 = DownBlock(width*4, width*8, use_attention=use_attention, dropout_rate=dropout_rate)
+        self.down4 = DownBlock(width*8, width*8, use_attention=use_attention, dropout_rate=dropout_rate)
         
-        # 瓶颈
+        # 瓶颈 - 减少dropout
         if use_attention:
             self.bottleneck_att = SpatialAttention()
-        self.bottleneck_dropout = nn.Dropout2d(dropout_rate*2)
+        self.bottleneck_dropout = nn.Dropout2d(dropout_rate)
         
-        # 解码器
-        self.up1 = UpBlock(width*8, width*8, width*4, use_attention=use_attention, dropout_rate=dropout_rate*1.5)
-        self.up2 = UpBlock(width*4, width*4, width*2, use_attention=use_attention, dropout_rate=dropout_rate)
+        # 解码器 - 减少dropout率
+        self.up1 = UpBlock(width*8, width*8, width*4, use_attention=use_attention, dropout_rate=dropout_rate)
+        self.up2 = UpBlock(width*4, width*4, width*2, use_attention=use_attention, dropout_rate=dropout_rate*0.5)
         self.up3 = UpBlock(width*2, width*2, width, use_attention=False, dropout_rate=dropout_rate*0.5)
         self.up4 = UpBlock(width, width, width, use_attention=False, dropout_rate=0)
         
-        # 超分辨率阶段
+        # 超分辨率阶段 - 减少dropout
         self.sr_conv = nn.Conv2d(width, width, kernel_size=3, padding=1)
-        self.sr_up1 = PixelShuffleBlock(width, scale_factor=2, dropout_rate=dropout_rate*0.3)
-        self.sr_up2 = PixelShuffleBlock(width, scale_factor=2, dropout_rate=dropout_rate*0.2)
+        self.sr_bn = nn.BatchNorm2d(width)  # 添加BN层稳定训练
+        self.sr_up1 = PixelShuffleBlock(width, scale_factor=2, dropout_rate=0)
+        self.sr_up2 = PixelShuffleBlock(width, scale_factor=2, dropout_rate=0)
         self.sr_up3 = PixelShuffleBlock(width, scale_factor=2, activation=False, dropout_rate=0)
         
         # 输出层
         self.output_conv = nn.Conv2d(width, img_channel, kernel_size=3, padding=1)
         
-        # 添加最终的注意力（可选）
-        if use_attention:
-            self.final_att = SpatialAttention()
-        
-        # 全局残差缩放因子
-        self.residual_scale = nn.Parameter(torch.tensor(0.1))
+        # 修复：移除可学习的残差缩放因子，使用固定的小权重
+        # self.residual_scale = nn.Parameter(torch.tensor(0.1))  # 删除这行
         
         # 初始化权重
         self._init_weights()
 
     def _init_weights(self):
-        """改进的权重初始化"""
+        """更保守的权重初始化"""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                # 使用较小的初始化避免梯度爆炸
+                # 使用更小的初始化避免梯度爆炸
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.normal_(m.weight, 0, 0.02)  # 更小的初始化
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm2d):
@@ -160,6 +165,7 @@ class UNetSA(nn.Module):
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.ConvTranspose2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.normal_(m.weight, 0, 0.02)  # 更小的初始化
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
@@ -201,19 +207,17 @@ class UNetSA(nn.Module):
         
         # 超分辨率路径
         x = self.sr_conv(x)
+        x = self.sr_bn(x)  # 添加BN层
+        x = F.relu(x)      # 添加激活函数
         x = self.sr_up1(x)
         x = self.sr_up2(x)
         x = self.sr_up3(x)
         
         # 输出卷积
-        x = self.output_conv(x)
+        residual = self.output_conv(x)
         
-        # 最终注意力（可选）
-        if self.use_attention:
-            x = self.final_att(x)
-        
-        # 残差连接 - 使用可学习的缩放因子
-        output = bicubic_up + self.residual_scale * x
+        # 修复：使用固定的小权重进行残差连接，避免训练不稳定
+        output = bicubic_up + 0.1 * residual
         
         # 裁剪回原始尺寸
         output = output[:, :, :orig_h * self.up_scale, :orig_w * self.up_scale]
@@ -228,7 +232,7 @@ class UNetSA(nn.Module):
 # 测试代码
 if __name__ == '__main__':
     # 创建模型
-    model = UNetSA(up_scale=8, img_channel=7, width=32, use_attention=True, dropout_rate=0.1)
+    model = UNetSA(up_scale=8, img_channel=7, width=32, use_attention=True, dropout_rate=0.05)
     
     # 测试不同尺寸的输入
     test_sizes = [(64, 64), (128, 128), (100, 150)]

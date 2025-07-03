@@ -12,17 +12,16 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 # --- 用户请在此处修改路径和参数 ---
-LR_DIR        = "/public/home/zyye/SR_organized/Imagey/WaterLand_TOA_tiles_lr"
-HR_DIR        = "/public/home/zyye/SR_organized/Imagey/WaterLand_TOA_tiles_hr"
-MODEL_PATH    = "/public/home/zyye/SR_organized/Unet_organized/Unet_SA_Claude/outputs/improved_training_no_overfit_2_lr0.0003_wd1e-05/models/checkpoint_epoch_75.pth"
-OUTPUT_DIR    = "/public/home/zyye/SR_organized/Unet_organized/Unet_SA_Claude/outputs/improved_training_no_overfit_2_lr0.0003_wd1e-05/test_results"
-IDX           = None           # 指定景序号(0-based)，不想遍历所有则设为 int，否则设为 None
+LR_DIR        = "../../Imagey/Imagery_WaterLand/WaterLand_TOA_tiles_lr"
+HR_DIR        = "../../Imagey/Imagery_WaterLand/WaterLand_TOA_tiles_hr"
+MODEL_PATH    = r"D:\Py_Code\Unet_SR\SR_zy\Unet_organized\Unet_SA_Claude\outputs\improved_model_v2_lr0.001_wd0.0001\models\best_psnr_model.pth"
+OUTPUT_DIR    = r"D:\Py_Code\Unet_SR\SR_zy\Unet_organized\Unet_SA_Claude\outputs\improved_model_v2_lr0.001_wd0.0001\test_results"
+IDX           = 68           # 指定景序号(0-based)，不想遍历所有则设为 int，否则设为 None
 UP_SCALE      = 8
 WIDTH         = 32            # 如果你使用了改进的模型，这里应该是32
 DROPOUT_RATE  = 0.1          # 改进模型的dropout率
 RGB_CHANNELS  = [3, 2, 1]    # 1-based 波段序号，用于 RGB 可视化
 # -----------------------------------
-
 from model_attention import UNetSA
 
 def load_model(path, device, up_scale, num_channels, width, dropout_rate=0.1):

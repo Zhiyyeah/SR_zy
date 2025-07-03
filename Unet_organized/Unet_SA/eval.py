@@ -12,10 +12,10 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 # --- 用户请在此处修改路径和参数 ---
-LR_DIR        = "/home/zyye/SR_backup/Imagery/Water_TOA_tiles_lr"
-HR_DIR        = "/home/zyye/SR_backup/Imagery/Water_TOA_tiles"
-MODEL_PATH    = "/home/zyye/SR_backup/Unet_SA/outputs/2default_5e-05/models/epoch_200.pth"
-OUTPUT_DIR    = "/home/zyye/SR_backup/Unet_SA/outputs/2default_5e-05/test_results"
+LR_DIR        = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Imagery_WaterLand\WaterLand_TOA_tiles_lr"
+HR_DIR        = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Imagery_WaterLand\WaterLand_TOA_tiles_hr"
+MODEL_PATH    = r"D:\Py_Code\Unet_SR\SR_zy\Unet_organized\Unet_SA\outputs\small_test_0.00043\models\epoch_1.pth"
+OUTPUT_DIR    = r"D:\Py_Code\Unet_SR\SR_zy\Unet_organized\Unet_SA\outputs\small_test_0.00043\test_results"
 IDX           =  None           # 指定景序号(0-based)，不想遍历所有则设为 int，否则设为 None
 UP_SCALE      = 8
 WIDTH         = 64

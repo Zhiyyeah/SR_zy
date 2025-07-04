@@ -10,12 +10,17 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from datetime import datetime
 
-# 导入本地模块
-from model_attention import UNetSA
-from data_loader import create_train_val_test_dataloaders
-from metrics import psnr, compute_ssim
-from utils import visualize_results, save_plots, save_metrics_to_file, get_device
-from model_io import save_model, load_model
+# 导入本地模块 - 确保这些模块存在
+try:
+    from model_attention import UNetSA
+    from data_loader import create_train_val_test_dataloaders
+    from metrics import psnr, compute_ssim
+    from utils import visualize_results, save_plots, save_metrics_to_file, get_device
+    from model_io import save_model, load_model
+except ImportError as e:
+    print(f"导入模块失败: {e}")
+    print("请确保所有自定义模块文件存在并且路径正确")
+    exit(1)
 
 # ====================== 配置参数 ======================
 experiment_name = 'zy_first_optimized'
@@ -23,11 +28,14 @@ experiment_name = 'zy_first_optimized'
 lr_dir = "Imagey/WaterLand_TOA_tiles_lr"
 hr_dir = "Imagey/WaterLand_TOA_tiles_hr"
 train_ratio = 0.8
+val_ratio = 0.1
+test_ratio = 0.1
 
 # 模型设置
 up_scale = 8
 width = 64
-dropout_rate = 0.05  # Dropout率（模型内部使用）
+dropout_rate = 0.05
+num_channels = 7  # 明确定义通道数
 
 # 训练设置
 batch_size = 16
@@ -36,13 +44,13 @@ pin_memory = True
 seed = 42
 epochs = 100
 learning_rate = 0.00043
-weight_decay = 0.0001  # 添加L2正则化
+weight_decay = 0.0001
 
 # 学习率调度器设置
-lr_scheduler_type = 'ReduceLROnPlateau'  # 可选: 'ReduceLROnPlateau', 'CosineAnnealing'
-lr_patience = 5  # ReduceLROnPlateau的patience
-lr_factor = 0.5  # ReduceLROnPlateau的factor
-lr_min = 1e-6  # 最小学习率
+lr_scheduler_type = 'ReduceLROnPlateau'  # 可选: 'ReduceLROnPlateau', 'CosineAnnealing', 'None'
+lr_patience = 5
+lr_factor = 0.5
+lr_min = 1e-6
 
 # 设备设置
 device = get_device()
@@ -56,11 +64,6 @@ rgb_channels = [3, 2, 1]
 
 # ====================== 辅助函数 ======================
 
-def save_training_history(history_df, save_path):
-    """保存训练历史为CSV文件"""
-    history_df.to_csv(save_path, index=False)
-    print(f"训练历史已保存到: {save_path}")
-
 def train_epoch(model, dataloader, criterion, optimizer):
     """训练一个轮次"""
     model.train()
@@ -72,8 +75,15 @@ def train_epoch(model, dataloader, criterion, optimizer):
     loop = tqdm(enumerate(dataloader), total=len(dataloader), ncols=100)
 
     for i, data in loop:
-        lr_imgs = data[0].to(device)
-        hr_imgs = data[1].to(device)
+        # 统一数据解包方式
+        if isinstance(data, (list, tuple)) and len(data) == 2:
+            lr_imgs, hr_imgs = data
+        else:
+            lr_imgs = data[0]
+            hr_imgs = data[1]
+            
+        lr_imgs = lr_imgs.to(device)
+        hr_imgs = hr_imgs.to(device)
         current_batch_size = lr_imgs.size(0)
         total_samples += current_batch_size
 
@@ -114,7 +124,13 @@ def validate_model(model, val_loader, criterion, device):
 
     with torch.no_grad():
         for i, data in enumerate(tqdm(val_loader, desc="验证中", ncols=100)):
-            lr_imgs, hr_imgs = data
+            # 统一数据解包方式
+            if isinstance(data, (list, tuple)) and len(data) == 2:
+                lr_imgs, hr_imgs = data
+            else:
+                lr_imgs = data[0]
+                hr_imgs = data[1]
+                
             lr_imgs = lr_imgs.to(device)
             hr_imgs = hr_imgs.to(device)
             batch_size = lr_imgs.size(0)
@@ -153,7 +169,13 @@ def test_model(model, test_loader, criterion, device):
     print(f"测试模型，共 {len(test_loader.dataset)} 张图像...")
     with torch.no_grad():
         for i, data in enumerate(tqdm(test_loader, desc="测试中", ncols=100)):
-            lr_imgs, hr_imgs = data
+            # 统一数据解包方式
+            if isinstance(data, (list, tuple)) and len(data) == 2:
+                lr_imgs, hr_imgs = data
+            else:
+                lr_imgs = data[0]
+                hr_imgs = data[1]
+                
             lr_imgs = lr_imgs.to(device)
             hr_imgs = hr_imgs.to(device)
             batch_size = lr_imgs.size(0)
@@ -238,19 +260,17 @@ def train_and_test():
     for dir_path in [experiment_dir, model_dir, test_results_dir, plots_dir]:
         os.makedirs(dir_path, exist_ok=True)
     
-    # 创建数据加载器
+    # 创建数据加载器 - 使用配置参数
     train_loader, val_loader, test_loader = create_train_val_test_dataloaders(
         lr_dir, hr_dir, batch_size, 
-        train_ratio=0.8, val_ratio=0.1, test_ratio=0.1,
-        seed=42, num_workers=4, pin_memory=True
+        train_ratio=train_ratio, val_ratio=val_ratio, test_ratio=test_ratio,
+        seed=seed, num_workers=num_workers, pin_memory=pin_memory
     )
     print(f"训练集样本数: {len(train_loader.dataset)}")
     print(f"验证集样本数: {len(val_loader.dataset)}")
     print(f"测试集样本数: {len(test_loader.dataset)}")
     
-    num_channels = 7
-    
-    # 创建模型（模型内部已实现Dropout）
+    # 创建模型
     model = UNetSA(up_scale=up_scale, img_channel=num_channels, width=width, 
                    use_attention=True, dropout_rate=dropout_rate).to(device)
     
@@ -258,23 +278,34 @@ def train_and_test():
     print(f"模型创建完成，共 {num_params} 个参数")
     print(f"模型内部Dropout率: {dropout_rate}")
     
-    # 创建优化器（添加权重衰减）
+    # 创建优化器
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     criterion = nn.MSELoss()
     
-    # 创建学习率调度器
+    # 创建学习率调度器 - 添加默认分支
+    scheduler = None
     if lr_scheduler_type == 'ReduceLROnPlateau':
         scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=lr_factor, 
                                     patience=lr_patience, min_lr=lr_min, verbose=True)
     elif lr_scheduler_type == 'CosineAnnealing':
         scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr_min)
+    else:
+        print(f"未知的学习率调度器类型: {lr_scheduler_type}，将不使用调度器")
     
     # 训练历史记录
     history_data = []
     best_val_psnr = 0.0
     
+    # 初始化默认指标，防止变量未定义
+    val_metrics = {
+        'loss': float('inf'),
+        'psnr': 0.0,
+        'ssim': 0.0
+    }
+    
     print(f"\n开始训练，共 {epochs} 个轮次...")
-    print(f"使用学习率调度器: {lr_scheduler_type}")
+    if scheduler:
+        print(f"使用学习率调度器: {lr_scheduler_type}")
     
     total_training_start_time = time.time()
     
@@ -292,10 +323,11 @@ def train_and_test():
         print(f"验证 - Loss: {val_metrics['loss']:.4f}, PSNR: {val_metrics['psnr']:.4f}, SSIM: {val_metrics['ssim']:.4f}")
         
         # 学习率调度
-        if lr_scheduler_type == 'ReduceLROnPlateau':
-            scheduler.step(val_metrics['psnr'])
-        elif lr_scheduler_type == 'CosineAnnealing':
-            scheduler.step()
+        if scheduler:
+            if lr_scheduler_type == 'ReduceLROnPlateau':
+                scheduler.step(val_metrics['psnr'])
+            elif lr_scheduler_type == 'CosineAnnealing':
+                scheduler.step()
         
         # 记录历史
         epoch_data = {
@@ -325,7 +357,7 @@ def train_and_test():
             save_model(model, model_dir, f"epoch_{epoch+1}.pth", val_metrics)
             print(f"已保存轮次 {epoch+1} 的模型")
         
-        # 保存最佳模型（基于验证集PSNR）
+        # 保存最佳模型
         if val_metrics['psnr'] > best_val_psnr:
             best_val_psnr = val_metrics['psnr']
             save_model(model, model_dir, "best_model.pth", val_metrics)
@@ -347,7 +379,7 @@ def train_and_test():
         'width': width,
         'dropout_rate': dropout_rate,
         'batch_size': batch_size,
-        'epochs': epoch + 1,  # 实际训练的轮次数
+        'epochs': epochs,
         'initial_learning_rate': learning_rate,
         'weight_decay': weight_decay,
         'lr_scheduler_type': lr_scheduler_type,
@@ -386,7 +418,7 @@ def train_and_test():
     # 创建并保存完整的训练总结
     summary_data = {
         '实验名称': experiment_name,
-        '总轮次': epoch + 1,
+        '总轮次': epochs,
         '最佳验证PSNR': best_val_psnr,
         '最终测试Loss': final_test_metrics['loss'],
         '最终测试PSNR': final_test_metrics['psnr'],
@@ -433,10 +465,14 @@ def main():
     print(f"  输出目录: {os.path.join(output_dir, f'{experiment_name}_{learning_rate}')}")
     
     print("\n🚀 开始训练和测试...")
-    _, final_metrics = train_and_test()
-    
-    print("\n✅ 训练和测试完成!")
-    print(f"最终测试集结果: Loss={final_metrics['loss']:.4f}, PSNR={final_metrics['psnr']:.4f}, SSIM={final_metrics['ssim']:.4f}")
+    try:
+        _, final_metrics = train_and_test()
+        print("\n✅ 训练和测试完成!")
+        print(f"最终测试集结果: Loss={final_metrics['loss']:.4f}, PSNR={final_metrics['psnr']:.4f}, SSIM={final_metrics['ssim']:.4f}")
+    except Exception as e:
+        print(f"\n❌ 训练过程中发生错误: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

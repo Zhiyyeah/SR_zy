@@ -24,8 +24,18 @@ RGB_CHANNELS  = [3, 2, 1]       # 1-based 波段序号，用于 RGB 可视化
 
 from model_attention import UNetSA
 
-def load_model(path, device, up_scale, num_channels, width):
-    model = UNetSA(up_scale=up_scale, img_channel=num_channels, width=width).to(device)
+# 新增：与训练保持一致
+USE_ATTENTION = True
+DROPOUT_P = 0.2
+
+def load_model(path, device, up_scale, num_channels, width, use_attention, dropout_p):
+    model = UNetSA(
+        up_scale=up_scale,
+        img_channel=num_channels,
+        width=width,
+        use_attention=use_attention,
+        dropout_p=dropout_p
+    ).to(device)
     ckpt  = torch.load(path, map_location=device)
     state = ckpt.get("state_dict", ckpt)
     model.load_state_dict(state)
@@ -200,7 +210,10 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tmp = read_image(lr_list[0])
     num_bands = tmp.shape[0]
-    model = load_model(MODEL_PATH, device, UP_SCALE, num_bands, WIDTH)
+    model = load_model(
+        MODEL_PATH, device, UP_SCALE, num_bands, WIDTH,
+        USE_ATTENTION, DROPOUT_P
+    )
 
     if IDX is not None:
         indices = [IDX]

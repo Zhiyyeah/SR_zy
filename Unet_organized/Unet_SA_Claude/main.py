@@ -29,6 +29,10 @@ train_ratio = 0.8
 # 模型设置
 up_scale = 8
 width = 64
+# 新增：注意力和Dropout参数
+use_attention = True
+# Dropout 概率（可根据需要调整）
+dropout_p = 0.2
 
 # 训练设置
 batch_size = 16
@@ -170,7 +174,13 @@ def train_and_test():
     num_channels = 7
 
     # 创建模型
-    model = UNetSA(up_scale=up_scale, img_channel=num_channels, width=width).to(device)
+    model = UNetSA(
+        up_scale=up_scale,
+        img_channel=num_channels,
+        width=width,
+        use_attention=use_attention,
+        dropout_p=dropout_p
+    ).to(device)
     num_params = sum(p.numel() for p in model.parameters())
     print(f"模型创建完成，共 {num_params} 个参数")
 

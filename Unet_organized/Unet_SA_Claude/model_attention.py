@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,23 +20,28 @@ class SpatialAttention(nn.Module):
         return x * weights
 
 class SimpleConvBlock(nn.Module):
-    """基础卷积块：Conv -> BN -> ReLU"""
-    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1):
+    """基础卷积块：Conv -> BN -> ReLU -> Dropout"""
+    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, dropout_p=0.2):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
         self.bn = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout2d(p=dropout_p) if dropout_p > 0 else nn.Identity()
 
     def forward(self, x):
-        return self.relu(self.bn(self.conv(x)))
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        return x
 
 class DoubleConvBlock(nn.Module):
-    """双卷积块 + 可选空间注意力"""
-    def __init__(self, in_channels, out_channels, use_attention=False):
+    """双卷积块 + 可选空间注意力 + Dropout"""
+    def __init__(self, in_channels, out_channels, use_attention=False, dropout_p=0.2):
         super().__init__()
         self.double_conv = nn.Sequential(
-            SimpleConvBlock(in_channels, out_channels),
-            SimpleConvBlock(out_channels, out_channels)
+            SimpleConvBlock(in_channels, out_channels, dropout_p=dropout_p),
+            SimpleConvBlock(out_channels, out_channels, dropout_p=dropout_p)
         )
         self.use_attention = use_attention
         if use_attention:
@@ -51,10 +55,10 @@ class DoubleConvBlock(nn.Module):
 
 class DownBlock(nn.Module):
     """下采样 + 双卷积块"""
-    def __init__(self, in_channels, out_channels, use_attention=False):
+    def __init__(self, in_channels, out_channels, use_attention=False, dropout_p=0.2):
         super().__init__()
         self.maxpool = nn.MaxPool2d(2)
-        self.conv = DoubleConvBlock(in_channels, out_channels, use_attention)
+        self.conv = DoubleConvBlock(in_channels, out_channels, use_attention, dropout_p=dropout_p)
 
     def forward(self, x):
         x = self.maxpool(x)
@@ -62,10 +66,10 @@ class DownBlock(nn.Module):
 
 class UpBlock(nn.Module):
     """上采样 + 跳跃连接 + 双卷积块"""
-    def __init__(self, in_channels, skip_channels, out_channels, use_attention=False):
+    def __init__(self, in_channels, skip_channels, out_channels, use_attention=False, dropout_p=0.2):
         super().__init__()
         self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-        self.conv = DoubleConvBlock(in_channels // 2 + skip_channels, out_channels, use_attention)
+        self.conv = DoubleConvBlock(in_channels // 2 + skip_channels, out_channels, use_attention, dropout_p=dropout_p)
 
     def forward(self, x, skip):
         x = self.up(x)
@@ -110,26 +114,27 @@ class AttentionPixelShuffleBlock(nn.Module):
         return x
 
 class UNetSA(nn.Module):
-    """UNet架构，仅使用空间注意力机制"""
-    def __init__(self, up_scale=8, img_channel=7, width=64, use_attention=True):
+    """UNet架构，仅使用空间注意力机制，支持Dropout"""
+    def __init__(self, up_scale=8, img_channel=7, width=64, use_attention=True, dropout_p=0.2):
         super().__init__()
         self.up_scale = up_scale
         self.use_attention = use_attention
+        self.dropout_p = dropout_p
         # 初始卷积
-        self.input_conv = DoubleConvBlock(img_channel, width, use_attention)
+        self.input_conv = DoubleConvBlock(img_channel, width, use_attention, dropout_p=dropout_p)
         # 编码器
-        self.down1 = DownBlock(width, width*2, use_attention=False)
-        self.down2 = DownBlock(width*2, width*4, use_attention=use_attention)
-        self.down3 = DownBlock(width*4, width*8, use_attention=use_attention)
-        self.down4 = DownBlock(width*8, width*8, use_attention=use_attention)
+        self.down1 = DownBlock(width, width*2, use_attention=use_attention, dropout_p=dropout_p)
+        self.down2 = DownBlock(width*2, width*4, use_attention=use_attention, dropout_p=dropout_p)
+        self.down3 = DownBlock(width*4, width*8, use_attention=use_attention, dropout_p=dropout_p)
+        self.down4 = DownBlock(width*8, width*8, use_attention=use_attention, dropout_p=dropout_p)
         # 瓶颈空间注意力
         if use_attention:
             self.bottleneck_att = SpatialAttention()
         # 解码器
-        self.up1 = UpBlock(width*8, width*8, width*4, use_attention=use_attention)
-        self.up2 = UpBlock(width*4, width*4, width*2, use_attention=use_attention)
-        self.up3 = UpBlock(width*2, width*2, width, use_attention=False)
-        self.up4 = UpBlock(width, width, width, use_attention=False)
+        self.up1 = UpBlock(width*8, width*8, width*4, use_attention=use_attention, dropout_p=dropout_p)
+        self.up2 = UpBlock(width*4, width*4, width*2, use_attention=use_attention, dropout_p=dropout_p)
+        self.up3 = UpBlock(width*2, width*2, width, use_attention=use_attention, dropout_p=dropout_p)
+        self.up4 = UpBlock(width, width, width, use_attention=use_attention, dropout_p=dropout_p)
         # 超分辨率阶段
         self.sr_up1 = AttentionPixelShuffleBlock(width, scale_factor=2, use_attention=use_attention)
         self.sr_up2 = AttentionPixelShuffleBlock(width, scale_factor=2, use_attention=use_attention)
@@ -175,7 +180,7 @@ class UNetSA(nn.Module):
 
 # 测试示例
 if __name__ == '__main__':
-    model = UNetSA(up_scale=8, img_channel=7, width=64, use_attention=True)
+    model = UNetSA(up_scale=8, img_channel=7, width=64, use_attention=True, dropout_p=0.2)
     x = torch.randn(1, 7, 64, 64)
     out = model(x)
     print('输入:', x.shape, '输出:', out.shape)

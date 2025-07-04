@@ -25,8 +25,8 @@ except ImportError as e:
 # ====================== 配置参数 ======================
 experiment_name = 'zy_first_optimized'
 # 数据设置
-lr_dir = "Imagey/WaterLand_TOA_tiles_lr"
-hr_dir = "Imagey/WaterLand_TOA_tiles_hr"
+lr_dir = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Small_Dataset\lr"
+hr_dir = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Small_Dataset\hr"
 train_ratio = 0.8
 val_ratio = 0.1
 test_ratio = 0.1

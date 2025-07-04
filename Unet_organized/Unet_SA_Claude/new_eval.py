@@ -7,17 +7,17 @@ from tqdm import tqdm
 from utils import load_image, bilinear_interpolation, visualize_results, get_device, save_metrics_to_file
 from model_attention import UNetSA
 
-# ==== 用户可自定义参数 ====
+# ==== User customizable parameters ====
 LR_DIR        = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Small_Dataset\lr"
 HR_DIR        = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Small_Dataset\hr"
-MODEL_PATH    = r"D:\Py_Code\Unet_SR\SR_zy\Unet_organized\Unet_SA_Claude\outputs\zy_first_optimized_0.00043\models\best_model.pth"
-OUTPUT_DIR    = r"D:\Py_Code\Unet_SR\SR_zy\Unet_organized\Unet_SA_Claude\outputs\zy_first_optimized_0.00043\test_results"
-IDX           = 68           # 指定景序号(0-based)，不想遍历所有则设为 int，否则设为 None
+MODEL_PATH    = r"D:\Py_Code\Unet_SR\SR_zy\outputs\zy_first_optimized_0.00043\models\best_model.pth"
+OUTPUT_DIR    = r"D:\Py_Code\Unet_SR\SR_zy\outputs\zy_first_optimized_0.00043\test_results"
+IDX           = 68           # Specify scene index (0-based), set to int to process one, or None to process all
 UP_SCALE      = 8
 WIDTH         = 64
 DROPOUT_RATE  = 0.1
-RGB_CHANNELS  = [3, 2, 1]    # 1-based 波段序号
-# ==========================
+RGB_CHANNELS  = [3, 2, 1]    # 1-based band indices
+# ======================================
 
 def load_model(path, device, up_scale, num_channels, width, dropout_rate=0.1):
     model = UNetSA(
@@ -27,20 +27,20 @@ def load_model(path, device, up_scale, num_channels, width, dropout_rate=0.1):
         dropout_rate=dropout_rate,
         use_attention=True
     ).to(device)
-    print(f"加载模型: {path}")
+    print(f"Loading model: {path}")
     ckpt = torch.load(path, map_location=device)
     if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
         model.load_state_dict(ckpt['model_state_dict'])
-        print(f"检测到新格式checkpoint，Epoch: {ckpt.get('epoch', 'unknown')}")
+        print(f"Detected new checkpoint format, Epoch: {ckpt.get('epoch', 'unknown')}")
         if 'test_metrics' in ckpt:
             metrics = ckpt['test_metrics']
-            print(f"保存时的测试指标:")
+            print(f"Test metrics at save:")
             print(f"  - Loss: {metrics.get('loss', 'N/A'):.4f}")
             print(f"  - PSNR: {metrics.get('psnr', 'N/A'):.2f} dB")
             print(f"  - SSIM: {metrics.get('ssim', 'N/A'):.4f}")
     else:
         model.load_state_dict(ckpt)
-        print("加载模型成功（旧格式）")
+        print("Model loaded successfully (old format)")
     model.eval()
     return model
 
@@ -51,7 +51,7 @@ def calculate_metrics(hr, sr):
     else:
         max_pixel = 1.0
         psnr = 20 * np.log10(max_pixel / np.sqrt(mse))
-    # 简单SSIM实现
+    # Simple SSIM implementation
     mean_hr = torch.mean(hr).item()
     mean_sr = torch.mean(sr).item()
     var_hr = torch.var(hr).item()
@@ -64,9 +64,9 @@ def calculate_metrics(hr, sr):
     return psnr, ssim
 
 def validate_scene(lr_path, hr_path, model, device):
-    print(f"  读取LR: {os.path.basename(lr_path)}")
+    print(f"  Reading LR: {os.path.basename(lr_path)}")
     lr = load_image(lr_path).to(device) / 10000.0
-    print(f"  读取HR: {os.path.basename(hr_path)}")
+    print(f"  Reading HR: {os.path.basename(hr_path)}")
     hr = load_image(hr_path).to(device) / 10000.0
     print(f"  LR shape: {tuple(lr.shape)}, range: [{lr.min():.3f}, {lr.max():.3f}]")
     print(f"  HR shape: {tuple(hr.shape)}, range: [{hr.min():.3f}, {hr.max():.3f}]")
@@ -80,9 +80,9 @@ def validate_scene(lr_path, hr_path, model, device):
     hr = hr.squeeze(0)
     psnr_sr, ssim_sr = calculate_metrics(hr, sr)
     psnr_bi, ssim_bi = calculate_metrics(hr, bilinear)
-    print(f"  SR结果 - PSNR: {psnr_sr:.2f} dB, SSIM: {ssim_sr:.4f}")
-    print(f"  双线性 - PSNR: {psnr_bi:.2f} dB, SSIM: {ssim_bi:.4f}")
-    print(f"  改善: PSNR +{psnr_sr - psnr_bi:.2f} dB")
+    print(f"  SR result - PSNR: {psnr_sr:.2f} dB, SSIM: {ssim_sr:.4f}")
+    print(f"  Bilinear - PSNR: {psnr_bi:.2f} dB, SSIM: {ssim_bi:.4f}")
+    print(f"  Improvement: PSNR +{psnr_sr - psnr_bi:.2f} dB")
     metrics = {
         "sr_psnr": psnr_sr,
         "sr_ssim": ssim_sr,
@@ -93,31 +93,31 @@ def validate_scene(lr_path, hr_path, model, device):
 
 def main():
     print("="*60)
-    print("超分辨率模型验证 (new_eval.py)")
+    print("Super-resolution Model Validation (new_eval.py)")
     print("="*60)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     lr_list = sorted(glob.glob(os.path.join(LR_DIR, "*.tif")))
     hr_list = sorted(glob.glob(os.path.join(HR_DIR, "*.tif")))
-    print(f"\n找到 {len(lr_list)} 个LR文件")
-    print(f"找到 {len(hr_list)} 个HR文件")
-    assert len(lr_list) == len(hr_list), "LR/HR 数量不匹配！"
-    assert len(lr_list) > 0, "没有找到图像文件！"
+    print(f"\nFound {len(lr_list)} LR files")
+    print(f"Found {len(hr_list)} HR files")
+    assert len(lr_list) == len(hr_list), "Number of LR/HR files do not match!"
+    assert len(lr_list) > 0, "No image files found!"
     device = get_device()
-    print(f"\n使用设备: {device}")
+    print(f"\nUsing device: {device}")
     tmp = load_image(lr_list[0])
     num_bands = tmp.shape[0]
-    print(f"检测到 {num_bands} 个波段")
-    print(f"\n加载模型...")
+    print(f"Detected {num_bands} bands")
+    print(f"\nLoading model...")
     model = load_model(MODEL_PATH, device, UP_SCALE, num_bands, WIDTH, DROPOUT_RATE)
     if IDX is not None:
         indices = [IDX]
-        print(f"\n只处理场景 #{IDX}")
+        print(f"\nOnly processing scene #{IDX}")
     else:
         indices = list(range(len(lr_list)))
-        print(f"\n将处理所有 {len(indices)} 个场景")
+        print(f"\nProcessing all {len(indices)} scenes")
     all_metrics = []
-    for i in tqdm(indices, desc="处理场景"):
-        print(f"\n>>> 场景 #{i}")
+    for i in tqdm(indices, desc="Processing scenes"):
+        print(f"\n>>> Scene #{i}")
         lr, bilinear, sr, hr, metrics = validate_scene(
             lr_list[i], hr_list[i], model, device
         )
@@ -130,11 +130,11 @@ def main():
         avg_psnr_bi = np.mean([m['bilinear_psnr'] for m in all_metrics])
         avg_ssim_bi = np.mean([m['bilinear_ssim'] for m in all_metrics])
         print("\n" + "="*60)
-        print("验证完成！")
-        print(f"\n平均指标 ({len(all_metrics)} 个场景):")
-        print(f"  超分辨率 - PSNR: {avg_psnr_sr:.2f} dB, SSIM: {avg_ssim_sr:.4f}")
-        print(f"  双线性   - PSNR: {avg_psnr_bi:.2f} dB, SSIM: {avg_ssim_bi:.4f}")
-        print(f"  平均改善 - PSNR: +{avg_psnr_sr - avg_psnr_bi:.2f} dB")
+        print("Validation complete!")
+        print(f"\nAverage metrics ({len(all_metrics)} scenes):")
+        print(f"  Super-resolution - PSNR: {avg_psnr_sr:.2f} dB, SSIM: {avg_ssim_sr:.4f}")
+        print(f"  Bilinear         - PSNR: {avg_psnr_bi:.2f} dB, SSIM: {avg_ssim_bi:.4f}")
+        print(f"  Average improvement - PSNR: +{avg_psnr_sr - avg_psnr_bi:.2f} dB")
         print("="*60)
         metrics_path = os.path.join(OUTPUT_DIR, "validation_metrics.txt")
         summary = {

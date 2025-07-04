@@ -286,7 +286,7 @@ def train_and_test():
     scheduler = None
     if lr_scheduler_type == 'ReduceLROnPlateau':
         scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=lr_factor, 
-                                    patience=lr_patience, min_lr=lr_min, verbose=True)
+                                    patience=lr_patience, min_lr=lr_min)
     elif lr_scheduler_type == 'CosineAnnealing':
         scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr_min)
     else:

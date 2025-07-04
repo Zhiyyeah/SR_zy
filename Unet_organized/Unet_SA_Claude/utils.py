@@ -31,23 +31,22 @@ def bilinear_interpolation(image, target_size):
 
 def visualize_results(lr_img, bilinear_img, sr_img, hr_img, metrics, save_path, rgb_channels=[3, 2, 1]):
     """
-    保存不同图像的对比可视化结果
-    
-    参数:
-        lr_img: 低分辨率输入图像
-        bilinear_img: 双线性插值图像
-        sr_img: 超分辨率输出图像
-        hr_img: 高分辨率真实图像
-        metrics: 包含指标的字典
-        save_path: 保存可视化结果的路径
-        rgb_channels: RGB通道索引
+    Save comparison visualization of different images
+    Args:
+        lr_img: Low-resolution input image
+        bilinear_img: Bilinear interpolated image
+        sr_img: Super-resolved output image
+        hr_img: High-resolution ground truth image
+        metrics: Dictionary containing metrics
+        save_path: Path to save the visualization
+        rgb_channels: RGB channel indices
     """
     imgs = [lr_img, bilinear_img, sr_img, hr_img]
     titles = [
-        '低分辨率输入',
-        f'双线性插值\nPSNR: {metrics["bilinear_psnr"]:.2f}dB\nSSIM: {metrics["bilinear_ssim"]:.4f}',
-        f'超分辨率\nPSNR: {metrics["sr_psnr"]:.2f}dB\nSSIM: {metrics["sr_ssim"]:.4f}',
-        '高分辨率真值'
+        'LR Input',
+        f'Bilinear\nPSNR: {metrics["bilinear_psnr"]:.2f}dB\nSSIM: {metrics["bilinear_ssim"]:.4f}',
+        f'SR Output\nPSNR: {metrics["sr_psnr"]:.2f}dB\nSSIM: {metrics["sr_ssim"]:.4f}',
+        'HR Ground Truth'
     ]
     
     def normalize(img):

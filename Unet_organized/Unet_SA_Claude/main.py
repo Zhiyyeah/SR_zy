@@ -20,8 +20,8 @@ from model_io import save_model, load_model
 # ====================== 配置参数 ======================
 experiment_name = 'zy_first_optimized'
 # 数据设置
-lr_dir = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Imagery_WaterLand\WaterLand_TOA_tiles_lr"
-hr_dir = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Imagery_WaterLand\WaterLand_TOA_tiles_hr"
+lr_dir = "Imagey/WaterLand_TOA_tiles_lr"
+hr_dir = "Imagey/WaterLand_TOA_tiles_hr"
 train_ratio = 0.8
 
 # 模型设置
@@ -240,7 +240,9 @@ def train_and_test():
     
     # 创建数据加载器
     train_loader, val_loader, test_loader = create_train_val_test_dataloaders(
-        lr_dir, hr_dir, batch_size, train_ratio, seed, num_workers, pin_memory
+        lr_dir, hr_dir, batch_size, 
+        train_ratio=0.8, val_ratio=0.1, test_ratio=0.1,
+        seed=42, num_workers=4, pin_memory=True
     )
     print(f"训练集样本数: {len(train_loader.dataset)}")
     print(f"验证集样本数: {len(val_loader.dataset)}")

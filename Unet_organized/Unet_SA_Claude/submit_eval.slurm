@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name=SR_Unet_SA
+#SBATCH --job-name=eval
 #SBATCH --output=main_log.out
 #SBATCH --error=main_err.out
 #SBATCH --partition=cpu               # 🔄 改为 CPU 分区

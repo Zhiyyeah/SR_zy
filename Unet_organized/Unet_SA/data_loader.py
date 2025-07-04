@@ -108,8 +108,8 @@ def create_train_test_dataloaders(lr_dir, hr_dir, batch_size, train_ratio=0.8, s
 if __name__ == "__main__":
 
     # 设置路径和参数
-    lr_dir = '/home/zyye/SR_backup/Imagery/Water_TOA_tiles_lr'
-    hr_dir = '/home/zyye/SR_backup/Imagery/Water_TOA_tiles'
+    lr_dir = 'Imagey/WaterLand_TOA_tiles_hr'
+    hr_dir = 'Imagey/WaterLand_TOA_tiles_hr'
     batch_size = 4
     train_ratio = 0.8
     seed = 42

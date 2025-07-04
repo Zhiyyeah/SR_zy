@@ -43,6 +43,15 @@ epochs = 100
 learning_rate = 0.00043
 weight_decay = 0
 
+# 优化器设置
+optimizer_type = 'AdamW'  # 可选 'Adam' 或 'AdamW'
+max_grad_norm = 1.0       # 梯度裁剪阈值
+
+# 学习率调度器设置
+lr_scheduler_patience = 10
+lr_scheduler_factor = 0.5
+min_lr = 1e-6
+
 # 设备设置
 device = get_device()
 
@@ -185,8 +194,16 @@ def train_and_test():
     print(f"模型创建完成，共 {num_params} 个参数")
 
     # 创建优化器
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    if optimizer_type == 'AdamW':
+        optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    else:
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     criterion = nn.MSELoss() # MSE损失函数，train_epoch 和 test_model 内部会取sqrt得到RMSE
+
+    # 学习率调度器
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=lr_scheduler_factor, patience=lr_scheduler_patience, min_lr=min_lr, verbose=True
+    )
 
     #训练前准备
     train_history = {'loss': [], 'psnr': [], 'ssim': []}
@@ -200,8 +217,36 @@ def train_and_test():
         epoch_start_time = time.time()
         print(f"\n📘 轮次 {epoch+1}/{epochs}")
 
-        # 训练、数据保存
-        train_metrics = train_epoch(model, train_loader, criterion, optimizer)
+        # === 训练 ===
+        model.train()
+        running_loss = 0.0
+        running_psnr = 0.0
+        running_ssim = 0.0
+        total_samples = 0
+        loop = tqdm(enumerate(train_loader), total=len(train_loader), ncols=100)
+        for i, data in loop:
+            lr_imgs = data[0].to(device)
+            hr_imgs = data[1].to(device)
+            current_batch_size = lr_imgs.size(0)
+            total_samples += current_batch_size
+            optimizer.zero_grad()
+            sr_imgs = model(lr_imgs)
+            loss = criterion(sr_imgs, hr_imgs)
+            loss.backward()
+            if max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            optimizer.step()
+            running_loss += loss.item() * current_batch_size
+            batch_psnr = psnr(hr_imgs, sr_imgs)
+            running_psnr += batch_psnr * current_batch_size
+            batch_ssim = compute_ssim(hr_imgs, sr_imgs)
+            running_ssim += batch_ssim * current_batch_size
+            loop.set_description(f"训练批次 {i+1}/{len(train_loader)}")
+            loop.set_postfix(loss=loss.item(), psnr=batch_psnr, ssim=batch_ssim)
+        epoch_loss = running_loss / total_samples if total_samples > 0 else 0
+        epoch_psnr = running_psnr / total_samples if total_samples > 0 else 0
+        epoch_ssim = running_ssim / total_samples if total_samples > 0 else 0
+        train_metrics = {'loss': epoch_loss, 'psnr': epoch_psnr, 'ssim': epoch_ssim}
         for k, v in train_metrics.items():
             train_history[k].append(v)
         print(f"训练损失: {train_metrics['loss']:.4f}, 训练PSNR: {train_metrics['psnr']:.4f}, 训练SSIM: {train_metrics['ssim']:.4f}")
@@ -225,6 +270,10 @@ def train_and_test():
             best_test_psnr = test_metrics['psnr']
             save_model(model, model_dir, "best_model.pth", test_metrics)
             print(f"已保存最佳模型 (基于测试PSNR): {best_test_psnr:.4f}")
+
+        # 学习率调度
+        scheduler.step(test_metrics['psnr'])
+        print(f'当前学习率: {optimizer.param_groups[0]["lr"]:.6f}')
 
         epoch_time_taken = time.time() - epoch_start_time
         print(f"轮次 {epoch+1} 耗时: {epoch_time_taken:.2f} 秒")

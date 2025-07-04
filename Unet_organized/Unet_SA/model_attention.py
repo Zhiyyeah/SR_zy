@@ -1,3 +1,4 @@
+from fcntl import F_GETLEASE
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -117,7 +118,7 @@ class UNetSA(nn.Module):
         # 初始卷积
         self.input_conv = DoubleConvBlock(img_channel, width, use_attention)
         # 编码器
-        self.down1 = DownBlock(width, width*2, use_attention=False)
+        self.down1 = DownBlock(width, width*2, use_attention=use_attention)
         self.down2 = DownBlock(width*2, width*4, use_attention=use_attention)
         self.down3 = DownBlock(width*4, width*8, use_attention=use_attention)
         self.down4 = DownBlock(width*8, width*8, use_attention=use_attention)
@@ -127,8 +128,8 @@ class UNetSA(nn.Module):
         # 解码器
         self.up1 = UpBlock(width*8, width*8, width*4, use_attention=use_attention)
         self.up2 = UpBlock(width*4, width*4, width*2, use_attention=use_attention)
-        self.up3 = UpBlock(width*2, width*2, width, use_attention=False)
-        self.up4 = UpBlock(width, width, width, use_attention=False)
+        self.up3 = UpBlock(width*2, width*2, width, use_attention=use_attention)
+        self.up4 = UpBlock(width, width, width, use_attention=use_attention)
         # 超分辨率阶段
         self.sr_up1 = AttentionPixelShuffleBlock(width, scale_factor=2, use_attention=use_attention)
         self.sr_up2 = AttentionPixelShuffleBlock(width, scale_factor=2, use_attention=use_attention)
@@ -174,7 +175,7 @@ class UNetSA(nn.Module):
 
 # 测试示例
 if __name__ == '__main__':
-    model = UNetSA(up_scale=8, img_channel=7, width=64, use_attention=True)
+    model = UNetSA(up_scale=8, img_channel=7, width=64, use_attention=False)
     x = torch.randn(1, 7, 64, 64)
     out = model(x)
     print('输入:', x.shape, '输出:', out.shape)

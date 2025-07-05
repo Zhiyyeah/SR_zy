@@ -14,8 +14,8 @@ from tqdm import tqdm
 # --- 用户请在此处修改路径和参数 ---
 LR_DIR        = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Imagery_WaterLand\WaterLand_TOA_tiles_lr"
 HR_DIR        = r"D:\Py_Code\Unet_SR\SR_zy\Imagey\Imagery_WaterLand\WaterLand_TOA_tiles_hr"
-MODEL_PATH    = r"D:\Py_Code\Unet_SR\SR_zy\Unet_organized\Unet_SA_Claude\outputs\zy_first_test_0.00043\models\epoch_1.pth"
-OUTPUT_DIR    = r"D:\Py_Code\Unet_SR\SR_zy\Unet_organized\Unet_SA_Claude\outputs\zy_first_test_0.00043\test_results"
+MODEL_PATH    = r"D:\Py_Code\Unet_SR\SR_zy\Unet_organized\Unet_SA_Claude\outputs\drop_lr_first_0.00043\models\epoch_74.pth"
+OUTPUT_DIR    = r"D:\Py_Code\Unet_SR\SR_zy\Unet_organized\Unet_SA_Claude\outputs\drop_lr_first_0.00043\test_results"
 IDX           =  1563           # 指定景序号(0-based)，不想遍历所有则设为 int，否则设为 None
 UP_SCALE      = 8
 WIDTH         = 64

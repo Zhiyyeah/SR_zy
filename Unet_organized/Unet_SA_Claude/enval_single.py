@@ -96,7 +96,7 @@ def read_multi_channel_image(path):
 
 def visualize_single_image_all_bands(lr_img, sr_img, hr_img, save_path, image_name, up_scale):
     """
-    可视化单张图像的所有波段
+    可视化单张图像的所有波段（每个波段独立 colorbar，且范围自适应）
     Args:
         lr_img: 低分辨率图像 tensor [C, H, W]
         sr_img: 超分辨率图像 tensor [C, H, W]
@@ -105,66 +105,60 @@ def visualize_single_image_all_bands(lr_img, sr_img, hr_img, save_path, image_na
         image_name: 图像名称
         up_scale: 上采样倍数
     """
+    import matplotlib as mpl
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
     num_channels = lr_img.shape[0]
-    
-    # 计算双线性插值结果
-    lr_img_tensor = lr_img.unsqueeze(0)  # 添加batch维度
+    lr_img_tensor = lr_img.unsqueeze(0)
     bicubic_img = bilinear_interpolation(lr_img_tensor, up_scale).squeeze(0)
-    
-    # 转换为numpy数组
     lr_np = lr_img.cpu().numpy()
     bicubic_np = bicubic_img.cpu().numpy()
     sr_np = sr_img.cpu().numpy()
     hr_np = hr_img.cpu().numpy()
-    
-    # 创建更紧凑的图形
-    fig = plt.figure(figsize=(20, 3 * num_channels))
-    gs = GridSpec(num_channels, 4, figure=fig, hspace=0.1, wspace=0.03)
-    
+
+    fig, axes = plt.subplots(num_channels, 4, figsize=(14, 2.2 * num_channels),
+                             gridspec_kw={'wspace': 0.01, 'hspace': 0.08})
+    if num_channels == 1:
+        axes = axes[np.newaxis, :]  # 保证二维
+
     for band_idx in range(num_channels):
-        # 低分辨率图像
-        ax1 = fig.add_subplot(gs[band_idx, 0])
-        img1 = normalize_for_display(lr_np[band_idx])
-        im1 = ax1.imshow(img1, cmap='viridis')
-        ax1.set_title(f'Band {band_idx + 1} - LR ({lr_np[band_idx].shape[0]}×{lr_np[band_idx].shape[1]})', fontsize=9)
+        # 计算该波段的自适应色阶范围
+        band_vals = [lr_np[band_idx], bicubic_np[band_idx], sr_np[band_idx], hr_np[band_idx]]
+        vmin = min(arr.min() for arr in band_vals)
+        vmax = max(arr.max() for arr in band_vals)
+        if vmin == vmax:
+            vmax = vmin + 1e-6  # 避免全黑
+
+        # 低分辨率
+        ax1 = axes[band_idx, 0]
+        im1 = ax1.imshow(lr_np[band_idx], cmap='viridis', vmin=vmin, vmax=vmax)
+        ax1.set_title(f'Band {band_idx + 1}\nLR', fontsize=10, pad=2)
         ax1.axis('off')
-        # 添加colorbar
-        cbar1 = plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
-        cbar1.ax.tick_params(labelsize=7)
-        
-        # 双线性插值结果
-        ax2 = fig.add_subplot(gs[band_idx, 1])
-        img2 = normalize_for_display(bicubic_np[band_idx])
-        im2 = ax2.imshow(img2, cmap='viridis')
-        ax2.set_title(f'Band {band_idx + 1} - Bilinear ({bicubic_np[band_idx].shape[0]}×{bicubic_np[band_idx].shape[1]})', fontsize=9)
+        # 双线性
+        ax2 = axes[band_idx, 1]
+        im2 = ax2.imshow(bicubic_np[band_idx], cmap='viridis', vmin=vmin, vmax=vmax)
+        ax2.set_title('Bilinear', fontsize=10, pad=2)
         ax2.axis('off')
-        # 添加colorbar
-        cbar2 = plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
-        cbar2.ax.tick_params(labelsize=7)
-        
-        # 超分辨率结果
-        ax3 = fig.add_subplot(gs[band_idx, 2])
-        img3 = normalize_for_display(sr_np[band_idx])
-        im3 = ax3.imshow(img3, cmap='viridis')
-        ax3.set_title(f'Band {band_idx + 1} - SR ({sr_np[band_idx].shape[0]}×{sr_np[band_idx].shape[1]})', fontsize=9)
+        # 超分辨率
+        ax3 = axes[band_idx, 2]
+        im3 = ax3.imshow(sr_np[band_idx], cmap='viridis', vmin=vmin, vmax=vmax)
+        ax3.set_title('SR', fontsize=10, pad=2)
         ax3.axis('off')
-        # 添加colorbar
-        cbar3 = plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
-        cbar3.ax.tick_params(labelsize=7)
-        
-        # 高分辨率图像（Ground Truth）
-        ax4 = fig.add_subplot(gs[band_idx, 3])
-        img4 = normalize_for_display(hr_np[band_idx])
-        im4 = ax4.imshow(img4, cmap='viridis')
-        ax4.set_title(f'Band {band_idx + 1} - HR ({hr_np[band_idx].shape[0]}×{hr_np[band_idx].shape[1]})', fontsize=9)
+        # 高分辨率
+        ax4 = axes[band_idx, 3]
+        im4 = ax4.imshow(hr_np[band_idx], cmap='viridis', vmin=vmin, vmax=vmax)
+        ax4.set_title('HR', fontsize=10, pad=2)
         ax4.axis('off')
-        # 添加colorbar
-        cbar4 = plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
-        cbar4.ax.tick_params(labelsize=7)
-    
-    plt.suptitle(f'Multi-band Super-Resolution Results - {image_name}', fontsize=14)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.savefig(os.path.join(save_path, f'{image_name}_all_bands.png'), dpi=150, bbox_inches='tight')
+        # 每行最后一列右侧加 colorbar
+        divider = make_axes_locatable(ax4)
+        cax = divider.append_axes('right', size='3.5%', pad=0.08)
+        cbar = plt.colorbar(im4, cax=cax)
+        if band_idx == 0:
+            cbar.set_label('TOA', fontsize=11)
+        cbar.ax.tick_params(labelsize=9)
+
+    fig.suptitle(f'Multi-band Super-Resolution Results\n{image_name}', fontsize=15, y=0.99)
+    plt.subplots_adjust(left=0.04, right=0.96, top=0.96, bottom=0.04)
+    plt.savefig(os.path.join(save_path, f'{image_name}_all_bands.png'), dpi=1000, bbox_inches='tight')
     plt.close()
 
 def calculate_metrics(sr_img, hr_img):
@@ -281,15 +275,17 @@ def validate_model(model_path, lr_dir, hr_dir, output_dir, num_images=5, up_scal
     metrics_file = os.path.join(output_dir, 'validation_metrics.txt')
     with open(metrics_file, 'w') as f:
         f.write(f"验证结果统计\n")
-        f.write(f"===============\n")
+        f.write(f"==============================\n")
         f.write(f"模型路径: {model_path}\n")
         f.write(f"测试图像数量: {len(lr_paths)}\n")
         f.write(f"平均 PSNR: {avg_psnr:.2f} dB\n")
         f.write(f"平均 SSIM: {avg_ssim:.4f}\n")
-        f.write(f"\n详细结果:\n")
+        f.write(f"\n详细结果 (每行: 序号  图像名  PSNR[dB]  SSIM)\n")
+        f.write(f"{ 'No.':<4} {'Image Name':<35} {'PSNR[dB]':>10} {'SSIM':>8}\n")
+        f.write(f"{'-'*4} {'-'*35} {'-'*10} {'-'*8}\n")
         for idx, (lr_path, psnr, ssim) in enumerate(zip(lr_paths, all_psnr, all_ssim)):
             image_name = os.path.splitext(os.path.basename(lr_path))[0]
-            f.write(f"{idx+1}. {image_name}: PSNR={psnr:.2f} dB\n")
+            f.write(f"{idx+1:<4} {image_name:<35} {psnr:>10.2f} {ssim:>8.4f}\n")
 
 def main():
     """主函数"""
@@ -313,7 +309,7 @@ def main():
     output_dir = os.path.join(experiment_dir, 'validation_results')
     
     # 验证参数
-    num_images = 10  # 要验证的图像数量
+    num_images = 100  # 要验证的图像数量
     up_scale = 8    # 上采样倍数
     device = get_device()
     

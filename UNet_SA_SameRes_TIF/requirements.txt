@@ -1,6 +1,0 @@
-torch
-numpy
-tqdm
-tifffile
-Pillow
-scikit-image

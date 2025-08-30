@@ -7,7 +7,10 @@ from torch.utils.data import Dataset, DataLoader
 
 
 def _read_tif(path: str) -> np.ndarray:
-    """Read TIFF into a float32 CHW array in [0,1]. Tries tifffile, falls back to PIL."""
+    """Read TIFF into CHW array. Do NOT rescale radiance; only cast to float32.
+
+    Tries tifffile, falls back to PIL.
+    """
     img = None
     try:
         import tifffile as tiff
@@ -39,24 +42,11 @@ def _read_tif(path: str) -> np.ndarray:
     else:
         raise ValueError(f"Unsupported TIFF shape: {arr.shape}")
 
-    if np.issubdtype(arr.dtype, np.integer):
-        arr = arr.astype(np.float32) / float(np.iinfo(arr.dtype).max)
-    else:
-        arr = arr.astype(np.float32)
-    return arr
+    # Do NOT normalize; preserve physical values. Cast to float32 for torch.
+    return arr.astype(np.float32, copy=False)
 
 
-def _center_crop_or_pad(arr: np.ndarray, size: int = 256) -> np.ndarray:
-    c, h, w = arr.shape
-    pad_h = max(0, size - h)
-    pad_w = max(0, size - w)
-    if pad_h > 0 or pad_w > 0:
-        pad = ((0, 0), (pad_h // 2, pad_h - pad_h // 2), (pad_w // 2, pad_w - pad_w // 2))
-        arr = np.pad(arr, pad, mode="reflect")
-        _, h, w = arr.shape
-    top = max(0, (h - size) // 2)
-    left = max(0, (w - size) // 2)
-    return arr[:, top:top + size, left:left + size]
+## Removed any crop/pad: keep original spatial size
 
 
 def _list_tifs(folder: str) -> List[str]:
@@ -105,14 +95,12 @@ def validate_pair_counts(lr_dir: str, hr_dir: str) -> dict:
 
 
 class PairTifDataset(Dataset):
-    """Paired 5-band TIFF dataset (enforces 256×256 via crop/pad)."""
+    """Paired 5-band TIFF dataset. No augmentation, no rescale, no resize."""
 
-    def __init__(self, lr_dir: str, hr_dir: str, size: int = 256, augment: bool = False, require_bands: int = 5):
+    def __init__(self, lr_dir: str, hr_dir: str, require_bands: int = 5):
         super().__init__()
         self.lr_dir = lr_dir
         self.hr_dir = hr_dir
-        self.size = size
-        self.augment = augment
         self.require_bands = require_bands
         self.files: List[Tuple[str, str]] = _pair_by_prefix(lr_dir, hr_dir)
         if len(self.files) == 0:
@@ -132,20 +120,7 @@ class PairTifDataset(Dataset):
             if hr.shape[0] != self.require_bands:
                 raise ValueError(f"HR has {hr.shape[0]} bands, expected {self.require_bands}: {hr_path}")
 
-        lr = _center_crop_or_pad(lr, self.size)
-        hr = _center_crop_or_pad(hr, self.size)
-
-        if self.augment:
-            if np.random.rand() < 0.5:
-                lr = lr[:, :, ::-1].copy()  # ensure positive strides
-                hr = hr[:, :, ::-1].copy()
-            if np.random.rand() < 0.5:
-                lr = lr[:, ::-1, :].copy()
-                hr = hr[:, ::-1, :].copy()
-            k = np.random.randint(0, 4)
-            if k:
-                lr = np.rot90(lr, k, axes=(1, 2)).copy()
-                hr = np.rot90(hr, k, axes=(1, 2)).copy()
+        # Keep original size (assumed consistent across dataset)
 
         # Make contiguous to avoid negative/irregular strides in torch.from_numpy
         lr_c = np.ascontiguousarray(lr)
@@ -159,14 +134,12 @@ class PairTifDataset(Dataset):
 def make_loader(
     lr_dir: str,
     hr_dir: str,
-    size: int = 256,
     batch_size: int = 8,
     shuffle: bool = True,
     num_workers: int = 0,
-    augment: bool = False,
     require_bands: int = 5,
 ):
-    ds = PairTifDataset(lr_dir=lr_dir, hr_dir=hr_dir, size=size, augment=augment, require_bands=require_bands)
+    ds = PairTifDataset(lr_dir=lr_dir, hr_dir=hr_dir, require_bands=require_bands)
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=True)
 
 

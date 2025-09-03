@@ -13,11 +13,11 @@ from .utils import set_seed, get_device, save_checkpoint
 from .losses import make_loss, CombinedLoss
 
 
-def split_dataset(ds: PairTifDataset, val_split: float):
+def split_dataset(ds: PairTifDataset, val_split: float, seed: int):
     n = len(ds)
     val_n = int(n * val_split)
     train_n = n - val_n
-    return random_split(ds, [train_n, val_n], generator=torch.Generator().manual_seed(123))
+    return random_split(ds, [train_n, val_n], generator=torch.Generator().manual_seed(seed))
 
 
 def _is_finite_tensor(x: torch.Tensor) -> bool:
@@ -114,7 +114,12 @@ def train_one_epoch(model, loader, optimizer, scaler, device, loss_fn):
         if VERBOSE and (batch_idx % LOG_EVERY_N == 0):
             try:
                 name_str = name if name is not None else "(no-name)"
-                print(f"[batch {batch_idx}/{len(loader)}] name={name_str} pred[min,max]=[{pred.min().item():.3e},{pred.max().item():.3e}] target[min,max]=[{hr_img.min().item():.3e},{hr_img.max().item():.3e}] loss={loss.item():.4f} psnr={tr_psnr:.2f}")
+                print(f"[batch {batch_idx}/{len(loader)}]")
+                # print(f"name={name_str}")
+                print(f"pred[min,max]=[{pred.min().item():.3e},{pred.max().item():.3e}]")
+                print(f"target[min,max]=[{hr_img.min().item():.3e},{hr_img.max().item():.3e}]")
+                print(f"loss={loss.item():.4f}")
+                print(f"psnr={tr_psnr:.2f}")
             except Exception:
                 pass
     avg_loss = sum(losses) / max(1, len(losses))
@@ -162,13 +167,13 @@ def main():
     BATCH_SIZE = 8
     LEARNING_RATE = 1e-4
     NUM_WORKERS = 0
-    LOSS_NAME = "charbonnier+ssim"  # 可选："charbonnier" 或 "charbonnier+ssim"
+    LOSS_NAME = "charbonnier"  # 可选："charbonnier" 或 "charbonnier+ssim"
     # 组合损失权重：loss = alpha * charbonnier + beta * (1 - SSIM)
     ALPHA_CHARB = 1.0
     # 建议 beta ∈ [0.02, 0.2]；100 过大易不稳定
     BETA_SSIM = 10.0
     SSIM_DATA_RANGE = None        # 若输入已归一化到[0,1]，可设为 1.0；否则保持 None 自动估计
-    VAL_SPLIT = 0.1
+    VAL_SPLIT = 0.3
     SEED = 42
     USE_AMP = True
 
@@ -179,7 +184,7 @@ def main():
     print(f"设备: {device} | CUDA 可用: {torch.cuda.is_available()}")
     print(f"数据路径: LR_DIR={LR_DIR} | HR_DIR={HR_DIR}")
     print(f"输出目录: {OUT_DIR}")
-    print(f"数据集划分: 验证集比例={VAL_SPLIT:.2f} | 划分随机种子=123 | 全局种子(SEED)={SEED}")
+    print(f"数据集划分: 验证集比例={VAL_SPLIT:.2f} | | 全局种子(SEED)={SEED}")
     print(f"Batch 大小: {BATCH_SIZE} | Epoch 数: {EPOCHS}")
     print(f"学习率: {LEARNING_RATE} | 优化器: AdamW | Scheduler: ReduceLROnPlateau(patience=3,factor=0.5)")
     print(f"AMP: {'启用' if USE_AMP else '关闭'}")
@@ -199,7 +204,8 @@ def main():
         print("样本文件预览(前3个 LR):", preview)
     except Exception:
         pass
-    train_ds, val_ds = split_dataset(ds_full, VAL_SPLIT)
+
+    train_ds, val_ds = split_dataset(ds_full, VAL_SPLIT, seed=SEED)
     print(f"训练集样本数: {len(train_ds)} | 验证集样本数: {len(val_ds)}")
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=max(1, BATCH_SIZE // 2), shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)

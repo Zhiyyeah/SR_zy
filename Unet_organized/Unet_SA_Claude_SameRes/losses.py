@@ -42,7 +42,7 @@ class SSIM(nn.Module):
     - `data_range` 为像素的动态范围（例如 1.0 或 255.0）。若为 None，则按当前 batch 的 target 动态估计。
     """
 
-    def __init__(self, window_size: int = 11, sigma: float = 1.5, data_range: float = None, reduction: str = "mean"):
+    def __init__(self, window_size: int = 31, sigma: float = 8.0, data_range: float = None, reduction: str = "mean"):
         super().__init__()
         assert window_size % 2 == 1, "window_size must be odd"
         self.window_size = window_size

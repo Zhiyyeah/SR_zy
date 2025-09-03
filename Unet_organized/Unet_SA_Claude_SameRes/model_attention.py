@@ -2,256 +2,178 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# ----------------------------------------------------------------#
+# 1. 注意力机制模块 (CBAM) - 模型的“水体适应性”核心
+# ----------------------------------------------------------------#
+class ChannelAttention(nn.Module):
+    """通道注意力模块"""
+    def __init__(self, in_planes, ratio=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
 
-# -----------------------------
-# 基础模块
-# -----------------------------
-class SEBlock(nn.Module):
-    """Squeeze-and-Excitation 通道注意力"""
-    def __init__(self, ch: int, reduction: int = 8):
-        super().__init__()
-        mid = max(1, ch // reduction)
-        self.avg = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
-            nn.Conv2d(ch, mid, 1, bias=True),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(mid, ch, 1, bias=True),
-            nn.Sigmoid()
+            nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False),
+            nn.ReLU(),
+            nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False)
         )
-    def forward(self, x):
-        w = self.fc(self.avg(x))
-        return x * w
+        self.sigmoid = nn.Sigmoid()
 
+    def forward(self, x):
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        out = avg_out + max_out
+        return self.sigmoid(out)
 
 class SpatialAttention(nn.Module):
-    """CBAM 风格的空间注意力（与你原模型一致）"""
-    def __init__(self, kernel_size: int = 7):
-        super().__init__()
-        p = (kernel_size - 1) // 2
-        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=p, bias=False)
+    """空间注意力模块"""
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
         self.sigmoid = nn.Sigmoid()
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+    def forward(self, x):
         avg_out = torch.mean(x, dim=1, keepdim=True)
         max_out, _ = torch.max(x, dim=1, keepdim=True)
-        attn = torch.cat([avg_out, max_out], dim=1)
-        attn = self.sigmoid(self.conv(attn))
-        return x * attn
+        x_cat = torch.cat([avg_out, max_out], dim=1)
+        out = self.conv1(x_cat)
+        return self.sigmoid(out)
 
+class CBAM(nn.Module):
+    """CBAM模块，结合通道和空间注意力"""
+    def __init__(self, in_planes, ratio=16, kernel_size=7):
+        super(CBAM, self).__init__()
+        self.ca = ChannelAttention(in_planes, ratio)
+        self.sa = SpatialAttention(kernel_size)
 
-def _best_gn_groups(ch: int, preferred: int = 8) -> int:
-    g = min(preferred, ch)
-    while g > 1 and (ch % g != 0):
-        g -= 1
-    return max(1, g)
-
-
-class DSConv7x7(nn.Module):
-    """Depthwise-Separable 7x7（先DW再PW）用于平滑低频"""
-    def __init__(self, ch: int):
-        super().__init__()
     def forward(self, x):
+        x = x * self.ca(x)
+        x = x * self.sa(x)
         return x
 
-
-# -----------------------------
-# 残差块（更稳的 dilation，加入 SE ）
-# -----------------------------
-class SASEBlock(nn.Module):
+# ----------------------------------------------------------------#
+# 2. 基础模块 (残差卷积块)
+# ----------------------------------------------------------------#
+class ResidualConvBlock(nn.Module):
     """
-    SpatialAttention + (Conv3x3(dilation)->GN->ReLU->Conv3x3(dilation)->GN) + 残差
+    带有残差连接和CBAM注意力的双卷积块
     """
-    def __init__(self, ch: int, dilation: int = 1, groups: int = 8, dropout: float = 0.0):
-        super().__init__()
-        g = _best_gn_groups(ch, groups)
-        pad = dilation
-        self.sa = SpatialAttention()
-        self.conv1 = nn.Conv2d(ch, ch, 3, padding=pad, dilation=dilation, bias=False)
-        self.gn1 = nn.GroupNorm(g, ch)
-        self.act1 = nn.ReLU(inplace=True)
-        self.drop = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
-        self.conv2 = nn.Conv2d(ch, ch, 3, padding=pad, dilation=dilation, bias=False)
-        self.gn2 = nn.GroupNorm(g, ch)
-        self.acto = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        identity = x
-        x = self.sa(x)
-        x = self.conv1(x)
-        x = self.gn1(x)
-        x = self.act1(x)
-        x = self.drop(x)
-        x = self.conv2(x)
-        x = self.gn2(x)
-        return self.acto(x + identity)
-
-
-# -----------------------------
-# 低频金字塔（多尺度平均池化 + 上采样 + 平滑）
-# -----------------------------
-class LowFreqPyramid(nn.Module):
-    """
-    多尺度 AvgPool -> Conv3x3 -> ReLU -> 上采样回原尺寸，聚合后用 7x7 深度可分离卷积平滑
-    """
-    def __init__(self, ch: int, scales=(2, 4, 8)):
-        super().__init__()
-        self.scales = scales
-        self.branches = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(ch, ch, 3, padding=1, bias=True),
-                nn.ReLU(inplace=True)
-            ) for _ in scales
-        ])
+    def __init__(self, in_channels, out_channels):
+        super(ResidualConvBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
         
-
-    def forward(self, x):
-        H, W = x.shape[-2], x.shape[-1]
-        outs = []
-        for i, s in enumerate(self.scales):
-            # 平均池化获取低频
-            pooled = F.avg_pool2d(x, kernel_size=s, stride=s, ceil_mode=True)
-            y = self.branches[i](pooled)
-            y = F.interpolate(y, size=(H, W), mode='bilinear', align_corners=False)
-            outs.append(y)
-        out = torch.stack(outs, dim=0).mean(dim=0)  # 多尺度聚合
+        self.residual_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
         
-        return out
+        self.attention = CBAM(out_channels)
+        
+    def forward(self, x):
+        residual = self.residual_conv(x)
+        
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        
+        out = self.attention(out) # 应用注意力
+        
+        out += residual # 添加残差连接
+        return F.relu(out)
 
-
-# -----------------------------
-# 门控融合（含低频下限约束）
-# -----------------------------
-class GatedFusion(nn.Module):
-    """
-    输入 LF/HF 两个特征，输出融合结果。
-    先生成逐像素 gate \in (0,1)，再做：
-        g' = lf_floor + (1 - lf_floor) * gate
-        out = g' * LF + (1 - g') * HF
-    """
-    def __init__(self, ch: int, lf_floor: float = 0.6):
-        super().__init__()
-        assert 0.0 <= lf_floor < 1.0
-        self.lf_floor = lf_floor
-        self.fuse = nn.Sequential(
-            nn.Conv2d(2 * ch, 1, 1, bias=True),
-            nn.Sigmoid()
-        )
-    def forward(self, lf, hf, mask: torch.Tensor = None):
-        g = self.fuse(torch.cat([lf, hf], dim=1))  # (N,1,H,W)
-        if mask is not None:
-            # 可选的水体掩膜：只在水体区域使用门控；陆地处更偏 LF/平滑
-            g = g * mask
-        # 简化：不再使用 lf_floor 约束，直接用 gate 融合
-        return g * lf + (1.0 - g) * hf
-
-
-# -----------------------------
-# 主干网络
-# -----------------------------
+# ----------------------------------------------------------------#
+# 3. U-Net 整体结构
+# ----------------------------------------------------------------#
 class UNetSASameRes(nn.Module):
-    """
-    水体低频友好型 SR 网络：
-        Head -> {HF 干路堆叠} & {LF 金字塔} -> 门控融合 -> Tail -> (可选残差输出)
-    支持 scale=1（同分辨率细化）或 >1（像素上采样 + 细化）
-    """
-    def __init__(
-        self,
-        in_channels: int = 5,
-        out_channels: int = 5,
-        base_ch: int = 64,
-        n_blocks: int = 8,
-        dilations: tuple = (1, 2, 1, 2, 1, 2, 1, 2),
-        groups: int = 8,
-        dropout: float = 0.0,
-        residual: bool = True,
-        lf_scales=(2, 4, 8),
-        lf_floor: float = 0.6,
-        scale: int = 1
-    ):
-        super().__init__()
-        assert scale in (1, 2, 4), "scale 仅支持 1/2/4（可按需扩展）"
-        self.scale = scale
-        self.residual = residual
+    def __init__(self, in_channels=5, out_channels=5):
+        super(UNetSASameRes, self).__init__()
 
-        # Head: 按需上采样（PixelShuffle），再映射到 base_ch
-        head_layers = []
-        if scale > 1:
-            # 先把输入升到中间通道，再 PixelShuffle 上采样
-            head_layers += [
-                nn.Conv2d(in_channels, base_ch * (scale ** 2), 3, padding=1, bias=True),
-                nn.PixelShuffle(upscale_factor=scale),
-                nn.Conv2d(base_ch, base_ch, 3, padding=1, bias=True),
-                nn.ReLU(inplace=True),
-            ]
-            self.res_up = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels * (scale ** 2), 3, padding=1, bias=True),
-                nn.PixelShuffle(upscale_factor=scale)
-            )
-        else:
-            head_layers += [nn.Conv2d(in_channels, base_ch, 3, padding=1, bias=True),
-                            nn.ReLU(inplace=True)]
-            self.res_up = nn.Conv2d(in_channels, out_channels, 1, bias=True)
+        # 编码器 (下采样)
+        self.encoder1 = ResidualConvBlock(in_channels, 64)
+        self.pool1 = nn.MaxPool2d(2, 2)
+        self.encoder2 = ResidualConvBlock(64, 128)
+        self.pool2 = nn.MaxPool2d(2, 2)
+        self.encoder3 = ResidualConvBlock(128, 256)
+        self.pool3 = nn.MaxPool2d(2, 2)
+        self.encoder4 = ResidualConvBlock(256, 512)
+        self.pool4 = nn.MaxPool2d(2, 2)
 
-        self.head = nn.Sequential(
-            *head_layers,
-            nn.GroupNorm(_best_gn_groups(base_ch, groups), base_ch)
-        )
+        # 瓶颈层
+        self.bottleneck = ResidualConvBlock(512, 1024)
 
-        # HF 干路：SASE 残差块堆叠（温和的 dilation）
-        blocks = []
-        for i in range(n_blocks):
-            d = dilations[i % len(dilations)]
-            blocks.append(SASEBlock(base_ch, dilation=d, groups=groups, dropout=dropout))
-        self.hf_trunk = nn.Sequential(*blocks)
+        # 解码器 (上采样)
+        self.upconv4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.decoder4 = ResidualConvBlock(1024, 512)
+        self.upconv3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.decoder3 = ResidualConvBlock(512, 256)
+        self.upconv2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.decoder2 = ResidualConvBlock(256, 128)
+        self.upconv1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.decoder1 = ResidualConvBlock(128, 64)
 
-        # LF 分支与门控融合
-        self.lf_branch = LowFreqPyramid(base_ch, scales=lf_scales)
-        self.fuser = GatedFusion(base_ch, lf_floor=lf_floor)
+        # 输出层
+        self.out_conv = nn.Conv2d(64, out_channels, kernel_size=1)
 
-        # Tail 输出
-        self.tail = nn.Conv2d(base_ch, out_channels, 1, bias=True)
+    def forward(self, x):
+        # 编码器
+        skip1 = self.encoder1(x)
+        skip2 = self.encoder2(self.pool1(skip1))
+        skip3 = self.encoder3(self.pool2(skip2))
+        skip4 = self.encoder4(self.pool3(skip3))
 
-        # 是否做输出残差
-        self.use_residual_out = residual
+        # 瓶颈层
+        bottleneck = self.bottleneck(self.pool4(skip4))
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-        """
-        x: (N, C_in, H, W)
-        mask: 可选 (N, 1, H', W')，若 scale>1 需与输出同尺度；用于在水体区域更依赖门控。
-        """
-        feat = self.head(x)           # -> (N, base_ch, H*scale, W*scale)
-        hf = self.hf_trunk(feat)      # 细节/中频
-        lf = self.lf_branch(feat)     # 低频/大尺度
+        # 解码器
+        d4 = self.upconv4(bottleneck)
+        d4 = torch.cat((skip4, d4), dim=1)
+        d4 = self.decoder4(d4)
 
-        fused = self.fuser(lf, hf, mask)  # 频域偏置式融合
+        d3 = self.upconv3(d4)
+        d3 = torch.cat((skip3, d3), dim=1)
+        d3 = self.decoder3(d3)
 
-        out = self.tail(fused)        # 通道回归
-        if self.use_residual_out:
-            out = out + self.res_up(x)  # 与输入（或其上采样）做残差对齐
-        return out
+        d2 = self.upconv2(d3)
+        d2 = torch.cat((skip2, d2), dim=1)
+        d2 = self.decoder2(d2)
+
+        d1 = self.upconv1(d2)
+        d1 = torch.cat((skip1, d1), dim=1)
+        d1 = self.decoder1(d1)
+
+        # 输出
+        return self.out_conv(d1)
+    
+def create_model(in_channels: int = 5, out_channels: int = 5) -> nn.Module:
+    return UNetSASameRes(in_channels=in_channels, out_channels=out_channels)
 
 
-# -----------------------------
-# 便捷创建与自检
-# -----------------------------
-def create_model(in_channels: int = 5, out_channels: int = 5, scale: int = 1) -> nn.Module:
-    return UNetSASameRes(in_channels=in_channels, out_channels=out_channels, scale=scale)
+# ----------------------------------------------------------------#
+# 4. 示例用法
+# ----------------------------------------------------------------#
+if __name__ == '__main__':
+    # 检查是否有可用的GPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-def count_parameters(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters())
+    # 模型实例化
+    # 输入5通道, 输出5通道
+    model = UNetSASameRes(in_channels=5, out_channels=5).to(device)
 
-if __name__ == "__main__":
-    IN_CH, OUT_CH = 5, 5
+    # 创建一个假的输入张量来测试
+    # 尺寸为 (batch_size, channels, height, width)
+    # 这里 batch_size=1, channels=5, height=256, width=256
+    dummy_input = torch.randn(1, 5, 256, 256).to(device)
+    
+    # 模型前向传播
+    output = model(dummy_input)
 
-    # 1) 同分辨率细化
-    model1 = create_model(IN_CH, OUT_CH, scale=1)
-    x1 = torch.randn(1, IN_CH, 256, 256)
-    with torch.no_grad():
-        y1 = model1(x1)
-    print("Same-res:", tuple(x1.shape), "->", tuple(y1.shape), "Params:", f"{count_parameters(model1):,}")
+    # 打印输入和输出的尺寸以验证
+    print(f"Input shape: {dummy_input.shape}")
+    print(f"Output shape: {output.shape}")
 
-    # 2) 2x 上采样 + 细化
-    model2 = create_model(IN_CH, OUT_CH, scale=2)
-    x2 = torch.randn(1, IN_CH, 128, 128)
-    with torch.no_grad():
-        y2 = model2(x2)
-    print("Scale=2:", tuple(x2.shape), "->", tuple(y2.shape), "Params:", f"{count_parameters(model2):,}")
+    # 打印模型参数量
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total trainable parameters: {total_params}({total_params / 1e6:.2f} M)")

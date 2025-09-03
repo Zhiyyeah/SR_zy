@@ -1,6 +1,6 @@
 import os
 from typing import List, Tuple
-
+import tifffile as tiff
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -12,22 +12,9 @@ def _read_tif(path: str) -> np.ndarray:
     Tries tifffile, falls back to PIL.
     """
     img = None
-    try:
-        import tifffile as tiff
-        arr = tiff.imread(path)
-        img = arr
-    except Exception:
-        try:
-            from PIL import Image
-            with Image.open(path) as im:
-                bands = len(im.getbands())
-                if bands > 1:
-                    arr = np.stack([np.array(im.getchannel(i)) for i in range(bands)], axis=0)
-                else:
-                    arr = np.array(im)[None, ...]
-                img = arr
-        except Exception as e:
-            raise RuntimeError(f"Failed to read TIFF: {path}. Error: {e}")
+    arr = tiff.imread(path)
+    img = arr
+
 
     if img is None:
         raise RuntimeError(f"Failed to read TIFF: {path}")
@@ -148,3 +135,16 @@ if __name__ == "__main__":
     LR_DIR = r"D:\Py_Code\img_match\SR_Imagery\tif\LR"
     HR_DIR = r"D:\Py_Code\img_match\SR_Imagery\tif\HR"
     validate_pair_counts(LR_DIR, HR_DIR)
+
+    # 测试 _read_tif 函数
+    def test_read_tif(path):
+        arr = _read_tif(path)
+        print(f"读取成功，shape: {arr.shape}, dtype: {arr.dtype}")
+
+
+    # 示例路径，请替换为实际存在的tif文件路径
+    test_tif_path = LR_DIR + "\\" + os.listdir(LR_DIR)[0] if os.listdir(LR_DIR) else None
+    if test_tif_path:
+        test_read_tif(test_tif_path)
+    else:
+        print("LR目录下没有tif文件可供测试")

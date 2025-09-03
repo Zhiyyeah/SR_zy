@@ -1,5 +1,7 @@
 import os
 import re
+import csv
+import time
 from typing import Optional, Tuple, List
 
 import numpy as np
@@ -14,11 +16,13 @@ from .data_loader import PairTifDataset
 from .model_attention import create_model
 from .utils import get_device, load_checkpoint
 from .metrics import psnr as psnr_fn
+from .main import split_dataset
 
 
 # --------------------
 # Config (edit as needed)
 # --------------------
+# 使用与训练相同的数据根目录，并按相同策略随机划分训练/验证
 LR_DIR = r"D:\Py_Code\img_match\SR_Imagery\tif\LR"
 HR_DIR = r"D:\Py_Code\img_match\SR_Imagery\tif\HR"
 WEIGHTS = "Unet_organized/Unet_SA_Claude_SameRes/outputs/run_auto/models/best.pth"##记着改
@@ -34,6 +38,10 @@ BICUBIC_BASELINE_FACTOR = 1  # 1 = disable; 2 or 4 = enable baseline blur
 # Colorbar unit label
 TOA_UNIT_LABEL = "TOA radiance (W·m⁻²·sr⁻¹·µm⁻¹)"
 VERBOSE_SKIP_LOG = True  # print reasons when a sample is skipped
+METRICS_CSV = os.path.join(SAVE_DIR, "metrics.csv")  # per-image metrics
+VAL_SPLIT = 0.1  # 与训练默认一致
+EVAL_LOG_EVERY = 25  # 每多少个样本打印一次进度指标
+PRINT_CONFIG = True  # 是否在开头打印配置
 
 
 # --------------------
@@ -141,6 +149,53 @@ def _resize_chw_order(chw: np.ndarray, out_h: int, out_w: int, order: int = 3) -
         ys = (np.linspace(0, h - 1, out_h)).round().astype(int)
         xs = (np.linspace(0, w - 1, out_w)).round().astype(int)
         return chw[:, ys][:, :, xs]
+
+
+def _psnr_np(pred: np.ndarray, target: np.ndarray, eps: float = 1e-8) -> float:
+    """PSNR using target dynamic range. Works on 2D arrays. NaN-safe."""
+    p = pred.astype(np.float64)
+    t = target.astype(np.float64)
+    mask = np.isfinite(p) & np.isfinite(t)
+    if not np.any(mask):
+        return float('nan')
+    diff = p[mask] - t[mask]
+    mse = float(np.nanmean(diff * diff))
+    if mse <= eps:
+        return 100.0
+    t_min = float(np.nanmin(t[mask]))
+    t_max = float(np.nanmax(t[mask]))
+    peak = max(t_max - t_min, eps)
+    return 20.0 * np.log10(peak) - 10.0 * np.log10(mse)
+
+
+def _r2_np(pred: np.ndarray, target: np.ndarray, eps: float = 1e-8) -> float:
+    """R^2 score for 2D arrays. NaN-safe."""
+    y = target.astype(np.float64)
+    yhat = pred.astype(np.float64)
+    mask = np.isfinite(y) & np.isfinite(yhat)
+    if not np.any(mask):
+        return float('nan')
+    yv = y[mask]
+    yh = yhat[mask]
+    ss_res = float(np.sum((yv - yh) ** 2))
+    y_mean = float(np.mean(yv))
+    ss_tot = float(np.sum((yv - y_mean) ** 2))
+    if ss_tot <= eps:
+        return 1.0 if ss_res <= eps else 0.0
+    return 1.0 - (ss_res / ss_tot)
+
+
+def _mape_np(pred: np.ndarray, target: np.ndarray, eps: float = 1e-8) -> float:
+    """MAPE (%) for 2D arrays with safe denom. NaN-safe."""
+    y = target.astype(np.float64)
+    yhat = pred.astype(np.float64)
+    mask = np.isfinite(y) & np.isfinite(yhat)
+    if not np.any(mask):
+        return float('nan')
+    yv = y[mask]
+    yh = yhat[mask]
+    denom = np.maximum(np.abs(yv), eps)
+    return float(np.mean(np.abs((yv - yh) / denom)) * 100.0)
 
 
 def read_nc_roi(nc_path: str, bbox_wgs84: Tuple[float, float, float, float], out_shape: Optional[Tuple[int, int, int]] = None) -> np.ndarray:
@@ -354,7 +409,10 @@ def save_four_col_figure(path: str, goci_raw: np.ndarray, interp: np.ndarray, sr
 
         ax = axes[i, 1]
         im1 = ax.imshow(int_b, cmap="viridis", vmin=vmin, vmax=vmax)
-        ax.set_title(f"Interp - {label}", fontsize=10, pad=4)
+        bic_psnr = _psnr_np(int_b, hr_b)
+        bic_r2 = _r2_np(int_b, hr_b)
+        bic_mape = _mape_np(int_b, hr_b)
+        ax.set_title(f"Interp - {label} | PSNR {bic_psnr:.2f} dB | R2 {bic_r2:.3f} | MAPE {bic_mape:.1f}%", fontsize=10, pad=4)
         ax.axis("off")
 
         # SR band PSNR vs HR
@@ -364,7 +422,9 @@ def save_four_col_figure(path: str, goci_raw: np.ndarray, interp: np.ndarray, sr
 
         ax = axes[i, 2]
         im2 = ax.imshow(sr_b, cmap="viridis", vmin=vmin, vmax=vmax)
-        ax.set_title(f"SR - {label} | PSNR {bpsnr:.2f} dB", fontsize=10, pad=4)
+        sr_r2 = _r2_np(sr_b, hr_b)
+        sr_mape = _mape_np(sr_b, hr_b)
+        ax.set_title(f"SR - {label} | PSNR {bpsnr:.2f} dB | R2 {sr_r2:.3f} | MAPE {sr_mape:.1f}%", fontsize=10, pad=4)
         ax.axis("off")
 
         ax = axes[i, 3]
@@ -436,7 +496,7 @@ def save_compact_fourcol_subplot(
             0.04,
             label_text,
             transform=ax.transAxes,
-            fontsize=10,
+            fontsize=9,
             color="w",
             ha="left",
             va="bottom",
@@ -488,8 +548,19 @@ def save_compact_fourcol_subplot(
         else:
             im0 = _draw(ax0, raw_b, vmin, vmax, f"{col_texts[0]} ({band_text})")
             ax0.set_aspect('equal')
-        _draw(ax1, bic_b, vmin, vmax, f"{col_texts[1]} ({band_text})")
-        _draw(ax2, sr_b, vmin, vmax, f"{col_texts[2]} ({band_text})")
+        # Compute metrics per band (bicubic vs HR, SR vs HR)
+        bic_psnr = _psnr_np(bic_b, hr_b)
+        bic_r2 = _r2_np(bic_b, hr_b)
+        bic_mape = _mape_np(bic_b, hr_b)
+        sr_psnr = _psnr_np(sr_b, hr_b)
+        sr_r2 = _r2_np(sr_b, hr_b)
+        sr_mape = _mape_np(sr_b, hr_b)
+
+        bic_text = f"{col_texts[1]} ({band_text})\nPSNR {bic_psnr:.2f} dB | R2 {bic_r2:.3f} | MAPE {bic_mape:.1f}%"
+        sr_text = f"{col_texts[2]} ({band_text})\nPSNR {sr_psnr:.2f} dB | R2 {sr_r2:.3f} | MAPE {sr_mape:.1f}%"
+
+        _draw(ax1, bic_b, vmin, vmax, bic_text)
+        _draw(ax2, sr_b, vmin, vmax, sr_text)
         im3 = _draw(ax3, hr_b, vmin, vmax, f"{col_texts[3]} ({band_text})")
         # Keep other columns square (most patches are H==W)
         ax1.set_aspect('equal'); ax2.set_aspect('equal'); ax3.set_aspect('equal')
@@ -546,16 +617,65 @@ def save_compact_fourcol_subplot(
 
 @torch.no_grad()
 def main():
+    t0 = time.time()
     device = get_device()
+    if PRINT_CONFIG:
+        print("================= Eval 配置 =================")
+        print(f"设备: {device} | CUDA 可用: {torch.cuda.is_available()}")
+        print(f"权重文件: {WEIGHTS}")
+        print(f"LR_DIR: {LR_DIR}\nHR_DIR: {HR_DIR}")
+        print(f"保存目录: {SAVE_DIR}")
+        print(f"VAL_SPLIT: {VAL_SPLIT} (使用与训练一致的 split_dataset 随机划分)")
+        print(f"EVAL_LOG_EVERY: {EVAL_LOG_EVERY}")
+        print("============================================")
     model = create_model(in_channels=5, out_channels=5).to(device)
     load_checkpoint(model, WEIGHTS, map_location=device)
     model.eval()
 
-    ds = PairTifDataset(lr_dir=LR_DIR, hr_dir=HR_DIR, require_bands=5)
+    ds_full = PairTifDataset(lr_dir=LR_DIR, hr_dir=HR_DIR, require_bands=5)
+    full_len = len(ds_full)
+    # 与训练相同的随机划分（使用 main.split_dataset 内置种子）
+    _, ds = split_dataset(ds_full, VAL_SPLIT)
+    eval_len = len(ds)
+    if PRINT_CONFIG:
+        print(f"完整数据集样本数: {full_len} | 验证子集样本数(本次评估): {eval_len}")
+        try:
+            preview = [os.path.basename(p[0]) for p in ds_full.files[:3]]
+            print("前 3 个样本预览:", preview)
+        except Exception:
+            pass
     os.makedirs(SAVE_DIR, exist_ok=True)
+    # Prepare metrics CSV
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    if not os.path.exists(METRICS_CSV):
+        with open(METRICS_CSV, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "filename",
+                # means
+                "bicubic_psnr_mean", "sr_psnr_mean",
+                "bicubic_r2_mean", "sr_r2_mean",
+                "bicubic_mape_mean", "sr_mape_mean",
+                # per-band PSNR
+                "bicubic_psnr_b1","bicubic_psnr_b2","bicubic_psnr_b3","bicubic_psnr_b4","bicubic_psnr_b5",
+                "sr_psnr_b1","sr_psnr_b2","sr_psnr_b3","sr_psnr_b4","sr_psnr_b5",
+                # per-band R2
+                "bicubic_r2_b1","bicubic_r2_b2","bicubic_r2_b3","bicubic_r2_b4","bicubic_r2_b5",
+                "sr_r2_b1","sr_r2_b2","sr_r2_b3","sr_r2_b4","sr_r2_b5",
+                # per-band MAPE
+                "bicubic_mape_b1","bicubic_mape_b2","bicubic_mape_b3","bicubic_mape_b4","bicubic_mape_b5",
+                "sr_mape_b1","sr_mape_b2","sr_mape_b3","sr_mape_b4","sr_mape_b5",
+            ])
 
     saved = 0
     skipped_no_bbox = 0
+    # 汇总整体平均指标（SR 与 Bicubic）
+    all_sr_psnr_means = []
+    all_bic_psnr_means = []
+    all_sr_r2_means = []
+    all_bic_r2_means = []
+    all_sr_mape_means = []
+    all_bic_mape_means = []
 
     for i in tqdm(range(len(ds)), desc="eval-4col"):
         lr_t, hr_t, name = ds[i]
@@ -577,7 +697,13 @@ def main():
                 tqdm.write(f"[warn] GOCI nc not found for scene={scene_core}")
         # get LR patch absolute path
         try:
-            lr_full, _ = ds.files[i]
+            # 兼容 Subset：从底层数据集中取对应文件路径
+            if hasattr(ds, 'files'):
+                lr_full, _ = ds.files[i]
+            elif hasattr(ds, 'dataset') and hasattr(ds, 'indices') and hasattr(ds.dataset, 'files'):
+                lr_full, _ = ds.dataset.files[ds.indices[i]]
+            else:
+                raise AttributeError('dataset has no files mapping')
         except Exception:
             lr_full = os.path.join(LR_DIR, os.path.basename(name))
         try:
@@ -646,8 +772,107 @@ def main():
             out_png = os.path.join(SAVE_DIR, f"{patch_base}_compare_4col.png")
             save_four_col_figure(out_png, goci_raw, bicubic_np, sr_np, hr_np, BAND_LABELS, title)
             saved += 1
+
+        # Compute per-band metrics (PSNR/R2/MAPE for bicubic vs HR, SR vs HR) and append to CSV
+        try:
+            nb = int(min(5, bicubic_np.shape[0], sr_np.shape[0], hr_np.shape[0]))
+            bic_psnrs = []
+            sr_psnrs = []
+            bic_r2s = []
+            sr_r2s = []
+            bic_mapes = []
+            sr_mapes = []
+            for bi in range(nb):
+                b_bic = bicubic_np[bi]
+                b_sr = sr_np[bi]
+                b_hr = hr_np[bi]
+                # PSNR
+                bic_psnrs.append(_psnr_np(b_bic, b_hr))
+                sr_psnrs.append(_psnr_np(b_sr, b_hr))
+                # R2
+                bic_r2s.append(_r2_np(b_bic, b_hr))
+                sr_r2s.append(_r2_np(b_sr, b_hr))
+                # MAPE
+                bic_mapes.append(_mape_np(b_bic, b_hr))
+                sr_mapes.append(_mape_np(b_sr, b_hr))
+            # pad to length 5 for consistent columns
+            while len(bic_psnrs) < 5:
+                bic_psnrs.append(float('nan'))
+            while len(sr_psnrs) < 5:
+                sr_psnrs.append(float('nan'))
+            while len(bic_r2s) < 5:
+                bic_r2s.append(float('nan'))
+            while len(sr_r2s) < 5:
+                sr_r2s.append(float('nan'))
+            while len(bic_mapes) < 5:
+                bic_mapes.append(float('nan'))
+            while len(sr_mapes) < 5:
+                sr_mapes.append(float('nan'))
+
+            mean_bic_psnr = float(np.nanmean(bic_psnrs))
+            mean_sr_psnr = float(np.nanmean(sr_psnrs))
+            mean_bic_r2 = float(np.nanmean(bic_r2s))
+            mean_sr_r2 = float(np.nanmean(sr_r2s))
+            mean_bic_mape = float(np.nanmean(bic_mapes))
+            mean_sr_mape = float(np.nanmean(sr_mapes))
+
+            # 累积整体统计
+            all_bic_psnr_means.append(mean_bic_psnr)
+            all_sr_psnr_means.append(mean_sr_psnr)
+            all_bic_r2_means.append(mean_bic_r2)
+            all_sr_r2_means.append(mean_sr_r2)
+            all_bic_mape_means.append(mean_bic_mape)
+            all_sr_mape_means.append(mean_sr_mape)
+
+            if (i % EVAL_LOG_EVERY) == 0:
+                tqdm.write(
+                    f"[eval] idx={i}/{eval_len} file={os.path.basename(name)} "
+                    f"bicPSNR={mean_bic_psnr:.2f} srPSNR={mean_sr_psnr:.2f} "
+                    f"bicR2={mean_bic_r2:.3f} srR2={mean_sr_r2:.3f} "
+                    f"bicMAPE={mean_bic_mape:.1f}% srMAPE={mean_sr_mape:.1f}%"
+                )
+
+            with open(METRICS_CSV, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    os.path.basename(name),
+                    # means
+                    mean_bic_psnr, mean_sr_psnr,
+                    mean_bic_r2, mean_sr_r2,
+                    mean_bic_mape, mean_sr_mape,
+                    # per-band
+                    *[float(x) for x in bic_psnrs[:5]],
+                    *[float(x) for x in sr_psnrs[:5]],
+                    *[float(x) for x in bic_r2s[:5]],
+                    *[float(x) for x in sr_r2s[:5]],
+                    *[float(x) for x in bic_mapes[:5]],
+                    *[float(x) for x in sr_mapes[:5]],
+                ])
+        except Exception as e:
+            if VERBOSE_SKIP_LOG:
+                tqdm.write(f"[warn] failed to write metrics CSV for {name}: {type(e).__name__}: {e}")
     if VERBOSE_SKIP_LOG:
-        tqdm.write(f"[summary] saved={saved}, no_bbox={skipped_no_bbox}")
+        tqdm.write(f"[summary] saved_figures={saved}, no_bbox={skipped_no_bbox}")
+
+    # 输出整体平均统计
+    def _safe_mean(lst):
+        arr = np.array(lst, dtype=float)
+        if arr.size == 0:
+            return float('nan')
+        return float(np.nanmean(arr))
+
+    global_summary = {
+        'bic_psnr_mean_over_images': _safe_mean(all_bic_psnr_means),
+        'sr_psnr_mean_over_images': _safe_mean(all_sr_psnr_means),
+        'bic_r2_mean_over_images': _safe_mean(all_bic_r2_means),
+        'sr_r2_mean_over_images': _safe_mean(all_sr_r2_means),
+        'bic_mape_mean_over_images': _safe_mean(all_bic_mape_means),
+        'sr_mape_mean_over_images': _safe_mean(all_sr_mape_means),
+    }
+    print("===== 全局评估平均指标 (逐影像平均再求整体平均) =====")
+    for k, v in global_summary.items():
+        print(f"{k}: {v:.4f}")
+    print(f"总耗时: {time.time()-t0:.2f} 秒")
 
 if __name__ == "__main__":
     main()

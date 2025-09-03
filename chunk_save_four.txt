@@ -1,0 +1,91 @@
+        raise RuntimeError("Not enough 2D band variables in NetCDF (recursive search)")
+
+    data = np.stack(chosen_vars[:5], axis=0)
+    return data, np.array(lat), np.array(lon)
+
+
+def roi_indices_from_latlon(
+    lat: np.ndarray, lon: np.ndarray, bbox_wgs84: Tuple[float, float, float, float]
+) -> Tuple[int, int, int, int]:
+    """Compute y0,y1,x0,x1 indices of ROI based on lat/lon arrays and bbox.
+    Handles lat/lon in 1D or 2D.
+    """
+    minx, miny, maxx, maxy = bbox_wgs84
+    if getattr(lat, "ndim", 0) == 1 and getattr(lon, "ndim", 0) == 1:
+        ys = np.where((lat >= miny) & (lat <= maxy))[0]
+        xs = np.where((lon >= minx) & (lon <= maxx))[0]
+        if ys.size == 0 or xs.size == 0:
+            raise RuntimeError("ROI outside lat/lon grid")
+        return int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max())
+    else:
+        mask = (lat >= miny) & (lat <= maxy) & (lon >= minx) & (lon <= maxx)
+        ys, xs = np.where(mask)
+        if ys.size == 0 or xs.size == 0:
+            raise RuntimeError("ROI mask empty for lat/lon grid")
+        return int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max())
+
+
+def save_four_col_figure(path: str, goci_raw: np.ndarray, interp: np.ndarray, sr: np.ndarray, hr: np.ndarray,
+                         band_labels: List[str], title: str):
+    import matplotlib.pyplot as plt
+
+    c = min(5, sr.shape[0], hr.shape[0], goci_raw.shape[0], interp.shape[0])
+    # Bigger canvas; explicit spacing to avoid overlap
+    fig, axes = plt.subplots(
+        nrows=c,
+        ncols=4,
+        figsize=(14.0, 2.6 * c),  # increase size
+        gridspec_kw=dict(wspace=0.25, hspace=0.35),  # a bit tighter but readable
+        constrained_layout=False,
+    )
+    try:
+        fig.suptitle(title, fontsize=12, y=0.985)
+    except Exception:
+        pass
+
+    for i in range(c):
+        raw_b = goci_raw[i]
+        int_b = interp[i]
+        sr_b = sr[i]
+        hr_b = hr[i]
+        vmin = float(min(raw_b.min(), int_b.min(), sr_b.min(), hr_b.min()))
+        vmax = float(max(raw_b.max(), int_b.max(), sr_b.max(), hr_b.max()))
+        label = band_labels[i] if i < len(band_labels) else f"Band {i+1}"
+
+        ax = axes[i, 0]
+        im0 = ax.imshow(raw_b, cmap="viridis", vmin=vmin, vmax=vmax)
+        ax.set_title(f"GOCI Raw - {label}", fontsize=10, pad=4)
+        ax.axis("off")
+
+        ax = axes[i, 1]
+        im1 = ax.imshow(int_b, cmap="viridis", vmin=vmin, vmax=vmax)
+        ax.set_title(f"Interp - {label}", fontsize=10, pad=4)
+        ax.axis("off")
+
+        # SR band PSNR vs HR
+        sr_t = torch.from_numpy(sr_b[None, None, ...])
+        hr_t = torch.from_numpy(hr_b[None, None, ...])
+        bpsnr = psnr_fn(sr_t, hr_t)
+
+        ax = axes[i, 2]
+        im2 = ax.imshow(sr_b, cmap="viridis", vmin=vmin, vmax=vmax)
+        ax.set_title(f"SR - {label} | PSNR {bpsnr:.2f} dB", fontsize=10, pad=4)
+        ax.axis("off")
+
+        ax = axes[i, 3]
+        im3 = ax.imshow(hr_b, cmap="viridis", vmin=vmin, vmax=vmax)
+        ax.set_title(f"HR - {label}", fontsize=10, pad=4)
+        ax.axis("off")
+        # Wider colorbar so it's visible
+        cbar = fig.colorbar(im3, ax=ax, fraction=0.05, pad=0.02, aspect=35)
+        cbar.ax.tick_params(labelsize=8)
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # Extra padding to respect suptitle
+    fig.subplots_adjust(top=0.92, bottom=0.06, left=0.06, right=0.98)
+    fig.savefig(path, dpi=400)
+    plt.close(fig)
+
+
+def save_compact_fourcol_subplot(
+    path: str,

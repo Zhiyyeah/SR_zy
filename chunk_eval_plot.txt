@@ -1,0 +1,111 @@
+        sr_t = torch.from_numpy(sr_b[None, None, ...])
+        hr_t = torch.from_numpy(hr_b[None, None, ...])
+        bpsnr = psnr_fn(sr_t, hr_t)
+
+        ax = axes[i, 2]
+        im2 = ax.imshow(sr_b, cmap="viridis", vmin=vmin, vmax=vmax)
+        ax.set_title(f"SR - {label} | PSNR {bpsnr:.2f} dB", fontsize=10, pad=4)
+        ax.axis("off")
+
+        ax = axes[i, 3]
+        im3 = ax.imshow(hr_b, cmap="viridis", vmin=vmin, vmax=vmax)
+        ax.set_title(f"HR - {label}", fontsize=10, pad=4)
+        ax.axis("off")
+        # Wider colorbar so it's visible
+        cbar = fig.colorbar(im3, ax=ax, fraction=0.05, pad=0.02, aspect=35)
+        cbar.ax.tick_params(labelsize=8)
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # Extra padding to respect suptitle
+    fig.subplots_adjust(top=0.92, bottom=0.06, left=0.06, right=0.98)
+    fig.savefig(path, dpi=400)
+    plt.close(fig)
+
+
+def save_compact_fourcol_subplot(
+    path: str,
+    goci_raw: np.ndarray,
+    bicubic: np.ndarray,
+    sr: np.ndarray,
+    hr: np.ndarray,
+    band_labels: List[str],
+    unit_label: str = TOA_UNIT_LABEL,
+    col_texts: Tuple[str, str, str, str] = ("GOCI-II", "Bicubic", "Super Resolution", "HR2"),
+    goci_roi_box: Optional[Tuple[int, int, int, int]] = None,  # (y0,y1,x0,x1) to limit view
+):
+    """Save a 4-column compact figure with tiny gaps and labels inside tiles.
+
+    Layout per row (very small gaps):
+        [ GOCI-II | Bicubic | Estimated map | HR2 | colorbar ]
+
+    - Text is drawn inside each image (bottom-left) with a semi-transparent
+      background patch plus stroke so其在浅色背景上依然清晰�?
+    - Row markers (a), (b), (c), ... on the first column.
+    - Each row has its own colorbar in a slim 5th column.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    nband = int(min(5, goci_raw.shape[0], bicubic.shape[0], sr.shape[0], hr.shape[0]))
+
+    # Figure geometry: 4 image columns + 1 colorbar column
+    fig = plt.figure(figsize=(15.0, 2.6 * nband))
+    gs = GridSpec(
+        nrows=nband,
+        ncols=5,
+        figure=fig,
+        # Make colorbar a bit slimmer
+        width_ratios=[1, 1, 1, 1, 0.045],
+        # Make horizontal gaps even smaller
+        wspace=0.006,
+        hspace=0.01,
+    )
+
+    # Helper to draw a single tile with inside text
+    def _draw(ax, img, vmin, vmax, label_text, imshow_kwargs=None):
+        if imshow_kwargs is None:
+            imshow_kwargs = {}
+        im = ax.imshow(img, cmap="viridis", vmin=vmin, vmax=vmax, **imshow_kwargs)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        # Text inside the image (bottom-left). Add black outline for readability.
+        ax.text(
+            0.02,
+            0.04,
+            label_text,
+            transform=ax.transAxes,
+            fontsize=10,
+            color="w",
+            ha="left",
+            va="bottom",
+            bbox=dict(facecolor="black", alpha=0.35, boxstyle="round,pad=0.2", linewidth=0),
+            path_effects=[
+                __import__("matplotlib.patheffects").patheffects.withStroke(linewidth=2, foreground="black")
+            ],
+        )
+        return im
+
+    for i in range(nband):
+        band_text = band_labels[i] if i < len(band_labels) else f"Band {i+1}"
+        raw_b = goci_raw[i]
+        bic_b = bicubic[i]
+        sr_b = sr[i]
+        hr_b = hr[i]
+
+        if goci_roi_box is not None:
+            y0, y1, x0, x1 = goci_roi_box
+            raw_for_range = raw_b[y0:y1 + 1, x0:x1 + 1]
+        else:
+            raw_for_range = raw_b
+        vmin = float(min(raw_for_range.min(), bic_b.min(), sr_b.min(), hr_b.min()))
+        vmax = float(max(raw_for_range.max(), bic_b.max(), sr_b.max(), hr_b.max()))
+
+        ax0 = fig.add_subplot(gs[i, 0])
+        ax1 = fig.add_subplot(gs[i, 1])
+        ax2 = fig.add_subplot(gs[i, 2])
+        ax3 = fig.add_subplot(gs[i, 3])
+        cax = fig.add_subplot(gs[i, 4])
+
+        # Draw images with very small gaps and internal labels

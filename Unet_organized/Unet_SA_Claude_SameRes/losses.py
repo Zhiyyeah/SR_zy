@@ -27,7 +27,12 @@ class CharbonnierLoss(nn.Module):
         self.eps = eps
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return torch.mean(torch.sqrt((pred - target) ** 2 + self.eps ** 2))
+        # Compute in float32 to avoid FP16 overflow under AMP when values are large
+        orig_dtype = pred.dtype
+        diff = (pred - target).float()
+        eps2 = torch.as_tensor(self.eps, dtype=diff.dtype, device=diff.device) ** 2
+        loss = torch.sqrt(diff * diff + eps2)
+        return loss.mean().to(orig_dtype)
 
 
 class SSIM(nn.Module):

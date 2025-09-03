@@ -1,3 +1,6 @@
+    with torch.no_grad():
+        y2 = model2(x2)
+    print("Scale=2:", tuple(x2.shape), "->", tuple(y2.shape), "Params:", f"{count_parameters(model2):,}")
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -56,15 +59,3 @@ class DSConv7x7(nn.Module):
 
 
 # -----------------------------
-# 残差块（更稳�?dilation，加�?SE �?# -----------------------------
-class SASEBlock(nn.Module):
-    """
-    SpatialAttention + (Conv3x3(dilation)->GN->ReLU->Conv3x3(dilation)->GN) + SE + 残差
-    """
-    def __init__(self, ch: int, dilation: int = 1, groups: int = 8, dropout: float = 0.0):
-        super().__init__()
-        g = _best_gn_groups(ch, groups)
-        pad = dilation
-        self.sa = SpatialAttention()
-        self.conv1 = nn.Conv2d(ch, ch, 3, padding=pad, dilation=dilation, bias=False)
-        self.gn1 = nn.GroupNorm(g, ch)

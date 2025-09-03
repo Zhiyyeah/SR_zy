@@ -1,3 +1,4 @@
+    print("Scale=2:", tuple(x2.shape), "->", tuple(y2.shape), "Params:", f"{count_parameters(model2):,}")
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

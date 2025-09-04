@@ -3,7 +3,6 @@ import math
 
 import torch
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import random_split, DataLoader
 from tqdm import tqdm
 
@@ -134,8 +133,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device, loss_fn):
         # 5. 详细日志
         if VERBOSE and (batch_idx % LOG_EVERY_N == 0):
             print(f"[batch {batch_idx}/{len(loader)}]")
-            print(f"pred[min,max]=[{pred.min().item():.3e},{pred.max().item():.3e}]")
-            print(f"target[min,max]=[{hr_img.min().item():.3e},{hr_img.max().item():.3e}]")
+            print(f"pred[min,max]=[{pred.min().item():.3g},{pred.max().item():.3g}]")
+            print(f"target[min,max]=[{hr_img.min().item():.3g},{hr_img.max().item():.3g}]")
             if isinstance(loss_fn, CombinedLoss) and charb_val is not None and ssim_loss_val is not None:
                 print(
                     f"loss=(total={loss.item():.4f}, charbonnier={charb_val:.4f}, "
@@ -176,7 +175,7 @@ def validate(model, loader, device, loss_fn):
 
 
 def main():
-    """程序入口：构建数据集 / 模型 / 优化器，执行带 warmup+cosine 的训练循环，并保存指标与权重。"""
+    """程序入口：构建数据集 / 模型 / 优化器，执行纯余弦学习率衰减的训练循环，并保存指标与权重。"""
     # Paths
     LR_DIR = r"D:\Py_Code\img_match\SR_Imagery\tif\LR"
     HR_DIR = r"D:\Py_Code\img_match\SR_Imagery\tif\HR"
@@ -184,12 +183,15 @@ def main():
 
     # Hyperparameters
     EPOCHS = 100
-    BATCH_SIZE = 12
+    BATCH_SIZE = 16
     LEARNING_RATE = 1e-4
     NUM_WORKERS = 0
-    LOSS_NAME = "charbonnier+ssim"  # or "charbonnier+ssim"
+    LOSS_NAME = "charbonnier"  # or "charbonnier+ssim"
     ALPHA_CHARB = 1.0
-    BETA_SSIM = 50.0
+    # SSIM 权重分段：前 SWITCH_EPOCH 个 epoch 使用较小值，之后使用较大值
+    BETA_SSIM_FIRST = 5.0
+    BETA_SSIM_LATER = 10.0
+    SWITCH_EPOCH = 5  # epoch 从 1 开始计数，<= SWITCH_EPOCH 用 FIRST
     SSIM_DATA_RANGE = None
     VAL_SPLIT = 0.3
     SEED = 42
@@ -203,7 +205,7 @@ def main():
     print(f"输出目录: {OUT_DIR}")
     print(f"数据集划分: 验证集比例={VAL_SPLIT:.2f} | 全局种子(SEED)={SEED}")
     print(f"Batch 大小: {BATCH_SIZE} | Epoch 数: {EPOCHS}")
-    print(f"学习率: {LEARNING_RATE} | 优化器: AdamW | Scheduler: warmup_cosine")
+    print(f"学习率: {LEARNING_RATE} | 优化器: AdamW | Scheduler: cosine")
     print(f"AMP: {'启用' if USE_AMP else '关闭'}")
     print(f"损失函数: {LOSS_NAME}")
     print(f"详细日志: VERBOSE={VERBOSE} | LOG_EVERY_N={LOG_EVERY_N}")
@@ -222,10 +224,10 @@ def main():
 
     model = create_model(in_channels=5, out_channels=5).to(device)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, betas=(0.9,0.99), weight_decay=1e-4)
-    # warmup + cosine 参数
-    WARMUP_EPOCHS = 5          # 线性升温 epoch 数
+    # 纯余弦衰减参数（无 warmup）
     MIN_LR_RATIO = 0.05        # 余弦调度最终相对最小学习率 (base_lr * ratio)
-    loss_fn = make_loss(LOSS_NAME, alpha=ALPHA_CHARB, beta=BETA_SSIM, ssim_data_range=SSIM_DATA_RANGE)
+    # 初始以第一阶段权重创建
+    loss_fn = make_loss(LOSS_NAME, alpha=ALPHA_CHARB, beta=BETA_SSIM_FIRST, ssim_data_range=SSIM_DATA_RANGE)
     scaler = (torch.amp.GradScaler('cuda') if (USE_AMP and device.type == 'cuda') else None)
 
     best_psnr = -1.0
@@ -236,31 +238,31 @@ def main():
         with open(log_path, 'w', encoding='utf-8') as f:
             f.write('epoch,train_loss,val_loss,train_psnr,val_psnr\n')
 
-        psnr_history = []
+    # 指标历史
+    psnr_history = []
 
-        def compute_warmup_cosine_lr(epoch_idx: int):
-                """计算第 epoch_idx 个 epoch 的学习率。
+    def compute_cosine_lr(epoch_idx: int):
+        """纯余弦衰减学习率（无 warmup）。
 
-                公式:
-                    warmup 阶段 (1..WARMUP_EPOCHS): lr = base_lr * epoch / WARMUP_EPOCHS
-                    余弦阶段: lr = min_lr + (base_lr - min_lr) * 0.5 * (1 + cos(pi * progress))
-                progress ∈ [0,1]
-                """
-                if epoch_idx <= WARMUP_EPOCHS:  # 线性升温
-                        return LEARNING_RATE * epoch_idx / max(1, WARMUP_EPOCHS)
-                # 进入余弦衰减阶段
-                progress = (epoch_idx - WARMUP_EPOCHS) / max(1, (EPOCHS - WARMUP_EPOCHS))
-                progress = min(1.0, max(0.0, progress))
-                cosine = 0.5 * (1 + math.cos(math.pi * progress))  # 从 1 -> 0 平滑
-                min_lr = LEARNING_RATE * MIN_LR_RATIO
-                return min_lr + (LEARNING_RATE - min_lr) * cosine
+        epoch_idx 从 1 开始：
+            progress = (epoch_idx - 1)/(EPOCHS - 1) ∈ [0,1]
+            lr = min_lr + (base_lr - min_lr) * 0.5 * (1 + cos(pi * progress))
+        """
+        progress = (epoch_idx - 1) / max(1, (EPOCHS - 1))
+        progress = min(1.0, max(0.0, progress))
+        cosine = 0.5 * (1 + math.cos(math.pi * progress))
+        min_lr = LEARNING_RATE * MIN_LR_RATIO
+        return min_lr + (LEARNING_RATE - min_lr) * cosine
 
-    for epoch in range(1, EPOCHS+1):  # epoch 从 1 开始，便于与 warmup 公式对应
-        # 更新学习率
-        new_lr = compute_warmup_cosine_lr(epoch)
+    for epoch in range(1, EPOCHS+1):  # epoch 从 1 开始
+        # 更新学习率（纯余弦衰减）
+        new_lr = compute_cosine_lr(epoch)
         for g in optimizer.param_groups:
             g['lr'] = new_lr
-        print(f"\n----- 开始 Epoch {epoch}/{EPOCHS} (lr={new_lr:.2e}) -----")
+        # 动态调整 SSIM 权重
+        if isinstance(loss_fn, CombinedLoss):
+            loss_fn.beta = (BETA_SSIM_FIRST if epoch <= SWITCH_EPOCH else BETA_SSIM_LATER)
+        print(f"\n----- 开始 Epoch {epoch}/{EPOCHS} (lr={new_lr:.2e}, beta_ssim={getattr(loss_fn,'beta','-')}) -----")
         tr_loss, tr_psnr = train_one_epoch(model, train_loader, optimizer, scaler, device, loss_fn)
         val_psnr, val_loss = validate(model, val_loader, device, loss_fn)
         psnr_history.append(val_psnr)

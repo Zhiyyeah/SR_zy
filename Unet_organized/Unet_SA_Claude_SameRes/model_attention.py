@@ -83,30 +83,16 @@ class ResidualConvBlock(nn.Module):
         out += residual # 添加残差连接
         return F.relu(out)
     
-class UpBlockPixelShuffle(nn.Module):
-    """
-    使用 PixelShuffle 的上采样模块
-    它包含: Conv -> PixelShuffle -> Conv
-    """
-    def __init__(self, in_channels, out_channels, scale_factor=2):
-        super(UpBlockPixelShuffle, self).__init__()
-        # 1. 第一个卷积层，用于生成 PixelShuffle 需要的通道数
-        self.conv1 = nn.Conv2d(in_channels, out_channels * scale_factor**2, kernel_size=3, padding=1)
-        # 2. PixelShuffle 操作
-        self.pixel_shuffle = nn.PixelShuffle(scale_factor)
-        # 3. BatchNorm 和激活函数
+class UpConv(nn.Module):
+    """反卷积上采样模块：ConvTranspose2d -> BN -> ReLU"""
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
         self.bn = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU()
-        # 4. 第二个卷积层，用于在特征重排后进一步整合信息
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-
+        self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        x = self.conv1(x)
-        x = self.pixel_shuffle(x)
-        x = self.relu(self.bn(x))
-        x = self.conv2(x)
-        return x
+        return self.relu(self.bn(self.up(x)))
 
 # ----------------------------------------------------------------#
 # 3. U-Net 整体结构
@@ -117,7 +103,7 @@ class UNetSASameRes(nn.Module):
     def __init__(self, in_channels=5, out_channels=5):
         super(UNetSASameRes, self).__init__()
 
-        # 编码器 (下采样) - 保持不变
+        # 编码器 (下采样)
         self.encoder1 = ResidualConvBlock(in_channels, 64)
         self.pool1 = nn.MaxPool2d(2, 2)
         self.encoder2 = ResidualConvBlock(64, 128)
@@ -127,31 +113,23 @@ class UNetSASameRes(nn.Module):
         self.encoder4 = ResidualConvBlock(256, 512)
         self.pool4 = nn.MaxPool2d(2, 2)
 
-        # 瓶颈层 - 保持不变
+        # 瓶颈层
         self.bottleneck = ResidualConvBlock(512, 1024)
 
-        # 解码器 (上采样) - 使用新的 UpBlockPixelShuffle 模块
-        # 原来: self.upconv4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
-        self.upconv4 = UpBlockPixelShuffle(1024, 512)
+        # 解码器 (上采样) - ConvTranspose2d 版本
+        self.upconv4 = UpConv(1024, 512)
         self.decoder4 = ResidualConvBlock(1024, 512)
-        
-        # 原来: self.upconv3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.upconv3 = UpBlockPixelShuffle(512, 256)
+        self.upconv3 = UpConv(512, 256)
         self.decoder3 = ResidualConvBlock(512, 256)
-        
-        # 原来: self.upconv2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.upconv2 = UpBlockPixelShuffle(256, 128)
+        self.upconv2 = UpConv(256, 128)
         self.decoder2 = ResidualConvBlock(256, 128)
-        
-        # 原来: self.upconv1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.upconv1 = UpBlockPixelShuffle(128, 64)
+        self.upconv1 = UpConv(128, 64)
         self.decoder1 = ResidualConvBlock(128, 64)
 
-        # 输出层 - 保持不变
+        # 输出层
         self.out_conv = nn.Conv2d(64, out_channels, kernel_size=1)
 
     def forward(self, x):
-        # 前向传播逻辑完全不需要改变，因为我们的新模块是直接替换
         # 编码器
         skip1 = self.encoder1(x)
         skip2 = self.encoder2(self.pool1(skip1))
@@ -178,7 +156,6 @@ class UNetSASameRes(nn.Module):
         d1 = torch.cat((skip1, d1), dim=1)
         d1 = self.decoder1(d1)
 
-        # 输出
         return self.out_conv(d1)
     
 def create_model(in_channels: int = 5, out_channels: int = 5) -> nn.Module:

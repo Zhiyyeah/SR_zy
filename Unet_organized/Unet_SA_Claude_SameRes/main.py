@@ -205,7 +205,7 @@ def main():
     print(f"输出目录: {OUT_DIR}")
     print(f"数据集划分: 验证集比例={VAL_SPLIT:.2f} | 全局种子(SEED)={SEED}")
     print(f"Batch 大小: {BATCH_SIZE} | Epoch 数: {EPOCHS}")
-    print(f"学习率: {LEARNING_RATE} | 优化器: AdamW | Scheduler: cosine")
+    print(f"学习率: {LEARNING_RATE} | 优化器: AdamW | Scheduler: warmup+cosine (warmup=3)")
     print(f"AMP: {'启用' if USE_AMP else '关闭'}")
     print(f"损失函数: {LOSS_NAME}")
     print(f"详细日志: VERBOSE={VERBOSE} | LOG_EVERY_N={LOG_EVERY_N}")
@@ -224,8 +224,9 @@ def main():
 
     model = create_model(in_channels=5, out_channels=5).to(device)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, betas=(0.9,0.99), weight_decay=1e-4)
-    # 纯余弦衰减参数（无 warmup）
-    MIN_LR_RATIO = 0.05        # 余弦调度最终相对最小学习率 (base_lr * ratio)
+    # 学习率调度：3 epoch 线性 warmup + 余弦衰减
+    WARMUP_EPOCHS = 3
+    MIN_LR_RATIO = 0.05  # 余弦阶段最终相对最小学习率 (base_lr * ratio)
     # 初始以第一阶段权重创建
     loss_fn = make_loss(LOSS_NAME, alpha=ALPHA_CHARB, beta=BETA_SSIM_FIRST, ssim_data_range=SSIM_DATA_RANGE)
     scaler = (torch.amp.GradScaler('cuda') if (USE_AMP and device.type == 'cuda') else None)
@@ -241,22 +242,25 @@ def main():
     # 指标历史
     psnr_history = []
 
-    def compute_cosine_lr(epoch_idx: int):
-        """纯余弦衰减学习率（无 warmup）。
+    def compute_lr(epoch_idx: int):
+        """3 epoch 线性 warmup + 余弦衰减。
 
-        epoch_idx 从 1 开始：
-            progress = (epoch_idx - 1)/(EPOCHS - 1) ∈ [0,1]
-            lr = min_lr + (base_lr - min_lr) * 0.5 * (1 + cos(pi * progress))
+        Warmup: lr = base_lr * epoch / WARMUP_EPOCHS (epoch ∈ [1, WARMUP_EPOCHS])
+        Cosine: lr = min_lr + (base_lr - min_lr)*0.5*(1+cos(pi * progress))
+                progress ∈ [0,1]
         """
-        progress = (epoch_idx - 1) / max(1, (EPOCHS - 1))
+        if epoch_idx <= WARMUP_EPOCHS:
+            return LEARNING_RATE * epoch_idx / max(1, WARMUP_EPOCHS)
+        # 余弦阶段
+        progress = (epoch_idx - WARMUP_EPOCHS) / max(1, (EPOCHS - WARMUP_EPOCHS))
         progress = min(1.0, max(0.0, progress))
         cosine = 0.5 * (1 + math.cos(math.pi * progress))
         min_lr = LEARNING_RATE * MIN_LR_RATIO
         return min_lr + (LEARNING_RATE - min_lr) * cosine
 
     for epoch in range(1, EPOCHS+1):  # epoch 从 1 开始
-        # 更新学习率（纯余弦衰减）
-        new_lr = compute_cosine_lr(epoch)
+        # 更新学习率（warmup+cosine）
+        new_lr = compute_lr(epoch)
         for g in optimizer.param_groups:
             g['lr'] = new_lr
         # 动态调整 SSIM 权重

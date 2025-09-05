@@ -39,7 +39,7 @@ BICUBIC_BASELINE_FACTOR = 1  # 1 = disable; 2 or 4 = enable baseline blur
 TOA_UNIT_LABEL = "TOA radiance (W·m⁻²·sr⁻¹·µm⁻¹)"
 VERBOSE_SKIP_LOG = True  # print reasons when a sample is skipped
 METRICS_CSV = os.path.join(SAVE_DIR, "metrics.csv")  # per-image metrics
-VAL_SPLIT = 0.1  # 与训练默认一致
+VAL_SPLIT = 0.3  # 与训练默认一致
 EVAL_LOG_EVERY = 25  # 每多少个样本打印一次进度指标
 PRINT_CONFIG = True  # 是否在开头打印配置
 
@@ -410,21 +410,19 @@ def save_four_col_figure(path: str, goci_raw: np.ndarray, interp: np.ndarray, sr
         ax = axes[i, 1]
         im1 = ax.imshow(int_b, cmap="viridis", vmin=vmin, vmax=vmax)
         bic_psnr = _psnr_np(int_b, hr_b)
-        bic_r2 = _r2_np(int_b, hr_b)
         bic_mape = _mape_np(int_b, hr_b)
-        ax.set_title(f"Interp - {label} | PSNR {bic_psnr:.2f} dB | R2 {bic_r2:.3f} | MAPE {bic_mape:.1f}%", fontsize=10, pad=4)
+        ax.set_title(f"Interp - {label} | PSNR {bic_psnr:.2f} dB | MAPE {bic_mape:.1f}%", fontsize=10, pad=4)
         ax.axis("off")
 
         # SR band PSNR vs HR
         sr_t = torch.from_numpy(sr_b[None, None, ...])
         hr_t = torch.from_numpy(hr_b[None, None, ...])
         bpsnr = psnr_fn(sr_t, hr_t)
+        sr_mape = _mape_np(sr_b, hr_b)
 
         ax = axes[i, 2]
         im2 = ax.imshow(sr_b, cmap="viridis", vmin=vmin, vmax=vmax)
-        sr_r2 = _r2_np(sr_b, hr_b)
-        sr_mape = _mape_np(sr_b, hr_b)
-        ax.set_title(f"SR - {label} | PSNR {bpsnr:.2f} dB | R2 {sr_r2:.3f} | MAPE {sr_mape:.1f}%", fontsize=10, pad=4)
+        ax.set_title(f"SR - {label} | PSNR {bpsnr:.2f} dB | MAPE {sr_mape:.1f}%", fontsize=10, pad=4)
         ax.axis("off")
 
         ax = axes[i, 3]
@@ -550,14 +548,12 @@ def save_compact_fourcol_subplot(
             ax0.set_aspect('equal')
         # Compute metrics per band (bicubic vs HR, SR vs HR)
         bic_psnr = _psnr_np(bic_b, hr_b)
-        bic_r2 = _r2_np(bic_b, hr_b)
         bic_mape = _mape_np(bic_b, hr_b)
         sr_psnr = _psnr_np(sr_b, hr_b)
-        sr_r2 = _r2_np(sr_b, hr_b)
         sr_mape = _mape_np(sr_b, hr_b)
 
-        bic_text = f"{col_texts[1]} ({band_text})\nPSNR {bic_psnr:.2f} dB | R2 {bic_r2:.3f} | MAPE {bic_mape:.1f}%"
-        sr_text = f"{col_texts[2]} ({band_text})\nPSNR {sr_psnr:.2f} dB | R2 {sr_r2:.3f} | MAPE {sr_mape:.1f}%"
+        bic_text = f"{col_texts[1]} ({band_text})\nPSNR {bic_psnr:.2f} dB | MAPE {bic_mape:.1f}%"
+        sr_text = f"{col_texts[2]} ({band_text})\nPSNR {sr_psnr:.2f} dB | MAPE {sr_mape:.1f}%"
 
         _draw(ax1, bic_b, vmin, vmax, bic_text)
         _draw(ax2, sr_b, vmin, vmax, sr_text)
@@ -615,6 +611,73 @@ def save_compact_fourcol_subplot(
     plt.close(fig)
 
 
+def eval_subset(ds_subset, split_name: str, model, device):
+    split_dir = os.path.join(SAVE_DIR, split_name)
+    os.makedirs(split_dir, exist_ok=True)
+    csv_path = os.path.join(split_dir, "metrics.csv")
+    if not os.path.exists(csv_path):
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "filename",
+                "sr_psnr_mean", "sr_mape_mean",
+                "sr_psnr_b1","sr_psnr_b2","sr_psnr_b3","sr_psnr_b4","sr_psnr_b5",
+                "sr_mape_b1","sr_mape_b2","sr_mape_b3","sr_mape_b4","sr_mape_b5",
+            ])
+    saved = 0
+    for i in tqdm(range(len(ds_subset)), desc=f"eval-{split_name}"):
+        lr_t, hr_t, name = ds_subset[i]
+        lr_t = lr_t.unsqueeze(0).to(device)
+        hr_t = hr_t.unsqueeze(0).to(device)
+        with torch.no_grad():
+            sr = model(lr_t)
+        sr_np = sr.squeeze(0).cpu().numpy()
+        hr_np = hr_t.squeeze(0).cpu().numpy()
+        lr_np = lr_t.squeeze(0).cpu().numpy()
+        goci_raw = np.zeros_like(lr_np)
+        patch_base = os.path.splitext(os.path.basename(name))[0]
+        out_png_compact = os.path.join(split_dir, f"{patch_base}_compare_compact.png")
+        try:
+            save_compact_fourcol_subplot(
+                out_png_compact,
+                goci_raw,
+                lr_np,
+                sr_np,
+                hr_np,
+                BAND_LABELS,
+                col_texts=("GOCI-II", "Interpolated GOCI", "Super Resolution", "Landsat"),
+                goci_roi_box=None,
+            )
+            saved += 1
+        except Exception:
+            out_png = os.path.join(split_dir, f"{patch_base}_compare_4col.png")
+            save_four_col_figure(out_png, goci_raw, lr_np, sr_np, hr_np, BAND_LABELS, patch_base)
+            saved += 1
+        # SR metrics only
+        try:
+            nb = int(min(5, sr_np.shape[0], hr_np.shape[0]))
+            sr_psnrs = []
+            sr_mapes = []
+            for bi in range(nb):
+                sr_psnrs.append(_psnr_np(sr_np[bi], hr_np[bi]))
+                sr_mapes.append(_mape_np(sr_np[bi], hr_np[bi]))
+            while len(sr_psnrs) < 5:
+                sr_psnrs.append(float('nan'))
+            while len(sr_mapes) < 5:
+                sr_mapes.append(float('nan'))
+            with open(csv_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    os.path.basename(name),
+                    float(np.nanmean(sr_psnrs)), float(np.nanmean(sr_mapes)),
+                    *[float(x) for x in sr_psnrs[:5]],
+                    *[float(x) for x in sr_mapes[:5]],
+                ])
+        except Exception as e:
+            tqdm.write(f"[warn] write CSV failed {name}: {type(e).__name__}: {e}")
+    tqdm.write(f"[summary:{split_name}] saved={saved} csv={csv_path}")
+
+
 @torch.no_grad()
 def main():
     t0 = time.time()
@@ -632,10 +695,27 @@ def main():
     load_checkpoint(model, WEIGHTS, map_location=device)
     model.eval()
 
+    # 使用与训练一致的随机划分，并分别评估 train/val（输出分开存放）
+    ds_full = PairTifDataset(lr_dir=LR_DIR, hr_dir=HR_DIR, require_bands=5)
+    full_len = len(ds_full)
+    train_ds, val_ds = split_dataset(ds_full, VAL_SPLIT)
+    if PRINT_CONFIG:
+        print(f"完整数据集样本数: {full_len} | 训练: {len(train_ds)} | 验证: {len(val_ds)}")
+        try:
+            preview = [os.path.basename(p[0]) for p in ds_full.files[:5]]
+            print("样本预览:", preview)
+        except Exception:
+            pass
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    eval_subset(train_ds, 'train', model, device)
+    eval_subset(val_ds, 'val', model, device)
+    print(f"总耗时: {time.time()-t0:.2f} 秒 | 输出目录: {SAVE_DIR}")
+    return
+
     ds_full = PairTifDataset(lr_dir=LR_DIR, hr_dir=HR_DIR, require_bands=5)
     full_len = len(ds_full)
     # 与训练相同的随机划分（使用 main.split_dataset 内置种子）
-    _, ds = split_dataset(ds_full, VAL_SPLIT)
+    train_ds, ds = split_dataset(ds_full, VAL_SPLIT)
     eval_len = len(ds)
     if PRINT_CONFIG:
         print(f"完整数据集样本数: {full_len} | 验证子集样本数(本次评估): {eval_len}")

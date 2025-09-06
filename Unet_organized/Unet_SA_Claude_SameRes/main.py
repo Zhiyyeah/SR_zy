@@ -179,21 +179,24 @@ def main():
     # Paths
     LR_DIR = r"D:\Py_Code\img_match\SR_Imagery\tif\LR"
     HR_DIR = r"D:\Py_Code\img_match\SR_Imagery\tif\HR"
-    OUT_DIR = "Unet_organized/Unet_SA_Claude_SameRes/outputs/run_auto"
+    exp_name = "run_auto"
+    OUT_DIR = f"Unet_organized/Unet_SA_Claude_SameRes/outputs/{exp_name}"
 
     # Hyperparameters
     EPOCHS = 100
     BATCH_SIZE = 16
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = 5e-5
     NUM_WORKERS = 0
-    LOSS_NAME = "charbonnier"  # or "charbonnier+ssim"
+    LOSS_NAME = "charbonnier+ssim"  # or "charbonnier+ssim"
     ALPHA_CHARB = 1.0
     # SSIM 权重分段：前 SWITCH_EPOCH 个 epoch 使用较小值，之后使用较大值
-    BETA_SSIM_FIRST = 5.0
-    BETA_SSIM_LATER = 10.0
+    BETA_SSIM_FIRST = 50.0
+    BETA_SSIM_LATER = 100.0
     SWITCH_EPOCH = 5  # epoch 从 1 开始计数，<= SWITCH_EPOCH 用 FIRST
     SSIM_DATA_RANGE = None
-    VAL_SPLIT = 0.3
+    # 数据集划分: 0.7 训练 / 0.2 验证 / 0.1 独立保留（主训练循环不使用）
+    TRAIN_RATIO = 0.7
+    VAL_RATIO = 0.2  # 剩余为 holdout
     SEED = 42
     USE_AMP = True
 
@@ -203,7 +206,7 @@ def main():
     print(f"设备: {device} | CUDA 可用: {torch.cuda.is_available()}")
     print(f"数据路径: LR_DIR={LR_DIR} | HR_DIR={HR_DIR}")
     print(f"输出目录: {OUT_DIR}")
-    print(f"数据集划分: 验证集比例={VAL_SPLIT:.2f} | 全局种子(SEED)={SEED}")
+    print(f"数据集划分: train={TRAIN_RATIO:.2f}, val={VAL_RATIO:.2f}, holdout={1-TRAIN_RATIO-VAL_RATIO:.2f} | 全局种子(SEED)={SEED}")
     print(f"Batch 大小: {BATCH_SIZE} | Epoch 数: {EPOCHS}")
     print(f"学习率: {LEARNING_RATE} | 优化器: AdamW | Scheduler: warmup+cosine (warmup=3)")
     print(f"AMP: {'启用' if USE_AMP else '关闭'}")
@@ -213,12 +216,23 @@ def main():
     os.makedirs(os.path.join(OUT_DIR, "models"), exist_ok=True)
 
     ds_full = PairTifDataset(lr_dir=LR_DIR, hr_dir=HR_DIR, require_bands=5)
-    print(f"完整数据集样本数: {len(ds_full)}")
+    total_n = len(ds_full)
+    print(f"完整数据集样本数: {total_n}")
+
+    # 计算各子集大小 (向下取整后由 holdout 吸收余数，确保总和=total_n)
+    train_n = int(total_n * TRAIN_RATIO)
+    val_n = int(total_n * VAL_RATIO)
+    holdout_n = total_n - train_n - val_n
+    assert train_n > 0 and val_n > 0 and holdout_n >= 0, "划分结果不合法，请检查数据量是否过小"
 
     from torch.utils.data import random_split
-    train_ds, val_ds = random_split(ds_full, [int(len(ds_full)*(1-VAL_SPLIT)), len(ds_full)-int(len(ds_full)*(1-VAL_SPLIT))],
-                                    generator=torch.Generator().manual_seed(SEED))
-    print(f"训练集样本数: {len(train_ds)} | 验证集样本数: {len(val_ds)}")
+    train_ds, val_ds, holdout_ds = random_split(
+        ds_full,
+        [train_n, val_n, holdout_n],
+        generator=torch.Generator().manual_seed(SEED)
+    )
+    print(f"训练集样本数: {len(train_ds)} | 验证集样本数: {len(val_ds)} | 保留(独立验证)样本数: {len(holdout_ds)}")
+    print("说明: 保留集(holdout)未参与当前训练与验证, 可在单独脚本中做最终评估。")
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=max(1, BATCH_SIZE//2), shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
 

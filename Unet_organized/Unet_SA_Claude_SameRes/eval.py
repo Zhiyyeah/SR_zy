@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import csv
 import time
@@ -14,7 +14,7 @@ matplotlib.use('Agg')  # 非交互式后端，不用Tkinter
 
 from .data_loader import PairTifDataset
 from .model_attention import create_model
-from .utils import get_device, load_checkpoint
+from .utils import get_device, load_checkpoint, set_seed
 from .metrics import psnr as psnr_fn
 from .main import split_dataset
 
@@ -25,8 +25,8 @@ from .main import split_dataset
 # 使用与训练相同的数据根目录，并按相同策略随机划分训练/验证
 LR_DIR = r"D:\Py_Code\img_match\SR_Imagery\tif\LR"
 HR_DIR = r"D:\Py_Code\img_match\SR_Imagery\tif\HR"
-WEIGHTS = "Unet_organized/Unet_SA_Claude_SameRes/outputs/run_auto/models/best.pth"##记着改
-SAVE_DIR = "Unet_organized/Unet_SA_Claude_SameRes/outputs/run_auto/eval/viz4"
+WEIGHTS = "Unet_organized/Unet_SA_Claude_SameRes/outputs/run_auto_charbonnier/models/best.pth"##记着�?
+SAVE_DIR = "Unet_organized/Unet_SA_Claude_SameRes/outputs/run_auto_charbonnier/eval"
 GOCI_ORI_ROOT = r"D:\Py_Code\img_match\batch_outputs"
 BAND_LABELS = ["443 nm", "490 nm", "555 nm", "660 nm", "865 nm"]
 
@@ -37,11 +37,13 @@ BICUBIC_BASELINE_FACTOR = 1  # 1 = disable; 2 or 4 = enable baseline blur
 
 # Colorbar unit label
 TOA_UNIT_LABEL = "TOA radiance (W·m⁻²·sr⁻¹·µm⁻¹)"
-VERBOSE_SKIP_LOG = True  # print reasons when a sample is skipped
-METRICS_CSV = os.path.join(SAVE_DIR, "metrics.csv")  # per-image metrics
-VAL_SPLIT = 0.3  # 与训练默认一致
-EVAL_LOG_EVERY = 25  # 每多少个样本打印一次进度指标
-PRINT_CONFIG = True  # 是否在开头打印配置
+VERBOSE_SKIP_LOG = True
+# ## per-image CSV 路径�?eval_subset 按子集分别创�?VAL_SPLIT = 0.3  # 与训练默认一�?
+EVAL_LOG_EVERY = 25  # 每多少个样本打印一次进度指�?
+PRINT_CONFIG = True  # 是否在开头打印配�?
+TRAIN_RATIO = 0.7
+VAL_RATIO = 0.2  # ʣ�� 0.1 ��Ϊ holdout
+SPLIT_SEED = 42
 
 
 # --------------------
@@ -378,14 +380,15 @@ def roi_indices_from_latlon(
 def save_four_col_figure(path: str, goci_raw: np.ndarray, interp: np.ndarray, sr: np.ndarray, hr: np.ndarray,
                          band_labels: List[str], title: str):
     import matplotlib.pyplot as plt
+    # 底纹样式（半透明黑）
+    text_bbox = dict(boxstyle="round,pad=0.15", facecolor="black", alpha=0.35, edgecolor="none")
 
     c = min(5, sr.shape[0], hr.shape[0], goci_raw.shape[0], interp.shape[0])
-    # Bigger canvas; explicit spacing to avoid overlap
     fig, axes = plt.subplots(
         nrows=c,
         ncols=4,
-        figsize=(14.0, 2.6 * c),  # increase size
-        gridspec_kw=dict(wspace=0.25, hspace=0.35),  # a bit tighter but readable
+        figsize=(14.0, 2.6 * c),
+        gridspec_kw=dict(wspace=0.25, hspace=0.35),
         constrained_layout=False,
     )
     try:
@@ -402,39 +405,36 @@ def save_four_col_figure(path: str, goci_raw: np.ndarray, interp: np.ndarray, sr
         vmax = float(max(raw_b.max(), int_b.max(), sr_b.max(), hr_b.max()))
         label = band_labels[i] if i < len(band_labels) else f"Band {i+1}"
 
-        ax = axes[i, 0]
-        im0 = ax.imshow(raw_b, cmap="viridis", vmin=vmin, vmax=vmax)
-        ax.set_title(f"GOCI Raw - {label}", fontsize=10, pad=4)
-        ax.axis("off")
+    ax = axes[i, 0]
+    im0 = ax.imshow(raw_b, cmap="viridis", vmin=vmin, vmax=vmax)
+    ax.axis("off")
+    ax.text(0.98, 0.04, f"GOCI Raw\n{label}", ha="right", va="bottom", color="w", fontsize=11, transform=ax.transAxes, bbox=text_bbox)
 
-        ax = axes[i, 1]
-        im1 = ax.imshow(int_b, cmap="viridis", vmin=vmin, vmax=vmax)
-        bic_psnr = _psnr_np(int_b, hr_b)
-        bic_mape = _mape_np(int_b, hr_b)
-        ax.set_title(f"Interp - {label} | PSNR {bic_psnr:.2f} dB | MAPE {bic_mape:.1f}%", fontsize=10, pad=4)
-        ax.axis("off")
+    ax = axes[i, 1]
+    ax.imshow(int_b, cmap="viridis", vmin=vmin, vmax=vmax)
+    bic_psnr = _psnr_np(int_b, hr_b)
+    bic_mape = _mape_np(int_b, hr_b)
+    ax.axis("off")
+    ax.text(0.98, 0.04, f"Interp\nPSNR {bic_psnr:.2f} dB\nMAPE {bic_mape:.1f}%", ha="right", va="bottom", color="w", fontsize=11, transform=ax.transAxes, bbox=text_bbox)
 
-        # SR band PSNR vs HR
-        sr_t = torch.from_numpy(sr_b[None, None, ...])
-        hr_t = torch.from_numpy(hr_b[None, None, ...])
-        bpsnr = psnr_fn(sr_t, hr_t)
-        sr_mape = _mape_np(sr_b, hr_b)
+    sr_t = torch.from_numpy(sr_b[None, None, ...])
+    hr_t = torch.from_numpy(hr_b[None, None, ...])
+    bpsnr = psnr_fn(sr_t, hr_t)
+    sr_mape = _mape_np(sr_b, hr_b)
 
-        ax = axes[i, 2]
-        im2 = ax.imshow(sr_b, cmap="viridis", vmin=vmin, vmax=vmax)
-        ax.set_title(f"SR - {label} | PSNR {bpsnr:.2f} dB | MAPE {sr_mape:.1f}%", fontsize=10, pad=4)
-        ax.axis("off")
+    ax = axes[i, 2]
+    ax.imshow(sr_b, cmap="viridis", vmin=vmin, vmax=vmax)
+    ax.axis("off")
+    ax.text(0.98, 0.04, f"SR\nPSNR {bpsnr:.2f} dB\nMAPE {sr_mape:.1f}%", ha="right", va="bottom", color="w", fontsize=11, transform=ax.transAxes, bbox=text_bbox)
 
-        ax = axes[i, 3]
-        im3 = ax.imshow(hr_b, cmap="viridis", vmin=vmin, vmax=vmax)
-        ax.set_title(f"HR - {label}", fontsize=10, pad=4)
-        ax.axis("off")
-        # Wider colorbar so it's visible
-        cbar = fig.colorbar(im3, ax=ax, fraction=0.05, pad=0.02, aspect=35)
-        cbar.ax.tick_params(labelsize=8)
+    ax = axes[i, 3]
+    im3 = ax.imshow(hr_b, cmap="viridis", vmin=vmin, vmax=vmax)
+    ax.axis("off")
+    ax.text(0.98, 0.04, f"HR\n{label}", ha="right", va="bottom", color="w", fontsize=11, transform=ax.transAxes, bbox=text_bbox)
+    cbar = fig.colorbar(im3, ax=ax, fraction=0.05, pad=0.02, aspect=35)
+    cbar.ax.tick_params(labelsize=8)
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    # Extra padding to respect suptitle
     fig.subplots_adjust(top=0.92, bottom=0.06, left=0.06, right=0.98)
     fig.savefig(path, dpi=400)
     plt.close(fig)
@@ -457,7 +457,7 @@ def save_compact_fourcol_subplot(
         [ GOCI-II | Bicubic | Estimated map | HR2 | colorbar ]
 
     - Text is drawn inside each image (bottom-left) with a semi-transparent
-      background patch plus stroke so其在浅色背景上依然清晰。
+      background patch plus stroke so其在浅色背景上依然清晰�?
     - Row markers (a), (b), (c), ... on the first column.
     - Each row has its own colorbar in a slim 5th column.
     """
@@ -484,24 +484,18 @@ def save_compact_fourcol_subplot(
         if imshow_kwargs is None:
             imshow_kwargs = {}
         im = ax.imshow(img, cmap="viridis", vmin=vmin, vmax=vmax, **imshow_kwargs)
-        ax.set_xticks([])
-        ax.set_yticks([])
+        ax.set_xticks([]); ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
-        # Text inside the image (bottom-left). Add black outline for readability.
+        # 右下角文字，无底纹
         ax.text(
-            0.02,
-            0.04,
-            label_text,
+            0.98, 0.04, label_text,
             transform=ax.transAxes,
-            fontsize=9,
+            fontsize=10,
             color="w",
-            ha="left",
+            ha="right",
             va="bottom",
-            bbox=dict(facecolor="black", alpha=0.35, boxstyle="round,pad=0.2", linewidth=0),
-            path_effects=[
-                __import__("matplotlib.patheffects").patheffects.withStroke(linewidth=2, foreground="black")
-            ],
+            bbox=dict(boxstyle="round,pad=0.15", facecolor="black", alpha=0.35, edgecolor="none")
         )
         return im
 
@@ -561,42 +555,22 @@ def save_compact_fourcol_subplot(
         # Keep other columns square (most patches are H==W)
         ax1.set_aspect('equal'); ax2.set_aspect('equal'); ax3.set_aspect('equal')
 
-        # Row marker e.g., (a), (b), ...
-        ax0.text(
-            0.02,
-            0.96,
-            f"({chr(97 + i)})",
-            transform=ax0.transAxes,
-            fontsize=12,
-            color="w",
-            va="top",
-            ha="left",
-            path_effects=[
-                __import__("matplotlib.patheffects").patheffects.withStroke(linewidth=2, foreground="black")
-            ],
-            bbox=dict(facecolor="black", alpha=0.35, boxstyle="round,pad=0.2", linewidth=0),
-        )
-
-        # Slim colorbar per row
+        # Row marker and per-row colorbar
+        ax0.text(0.02, 0.96, f"({chr(97 + i)})", transform=ax0.transAxes, fontsize=13, color="w", va="top", ha="left")
         cb = fig.colorbar(im3, cax=cax)
         cb.ax.tick_params(labelsize=7, pad=1)
-        # Thinner outline so it looks lighter
         try:
             cb.outline.set_linewidth(0.6)
         except Exception:
             pass
-
-        # Add unit label next to colorbar
         try:
             cb.set_label(unit_label, fontsize=7, rotation=270, labelpad=6)
             cb.ax.yaxis.set_label_position("right")
         except Exception:
             pass
-
-        # Slightly shorten the colorbar vertically (shrink and recenter)
         try:
             bbox = cax.get_position()
-            shrink = 0.9  # keep 90% height
+            shrink = 0.9
             new_h = bbox.height * shrink
             new_y = bbox.y0 + (bbox.height - new_h) / 2.0
             cax.set_position([bbox.x0, new_y, bbox.width, new_h])
@@ -634,7 +608,44 @@ def eval_subset(ds_subset, split_name: str, model, device):
         sr_np = sr.squeeze(0).cpu().numpy()
         hr_np = hr_t.squeeze(0).cpu().numpy()
         lr_np = lr_t.squeeze(0).cpu().numpy()
-        goci_raw = np.zeros_like(lr_np)
+        # Restore GOCI first-column rendering using original logic
+        scene_core = scene_id_from_patch_name(name)
+        # resolve LR full path from subset
+        try:
+            if hasattr(ds_subset, 'files'):
+                lr_full, _ = ds_subset.files[i]
+            elif hasattr(ds_subset, 'dataset') and hasattr(ds_subset, 'indices') and hasattr(ds_subset.dataset, 'files'):
+                lr_full, _ = ds_subset.dataset.files[ds_subset.indices[i]]
+            else:
+                raise AttributeError('dataset has no files mapping')
+        except Exception:
+            lr_full = os.path.join(LR_DIR, os.path.basename(name))
+
+        # Default fallbacks
+        goci_label = "GOCI-II"
+        goci_full = None
+        roi_box = None
+
+        # Compute patch bounds and find GOCI NetCDF
+        try:
+            bbox_wgs84, _ = get_patch_bounds_wgs84(lr_full)
+        except Exception:
+            bbox_wgs84 = None
+        nc_path = find_nc_for_scene(GOCI_ORI_ROOT, scene_core)
+        if nc_path is not None:
+            try:
+                goci_full, goci_lat, goci_lon = read_nc_full_and_latlon(nc_path)
+                if bbox_wgs84 is not None:
+                    y0, y1, x0, x1 = roi_indices_from_latlon(goci_lat, goci_lon, bbox_wgs84)
+                    roi_box = (y0, y1, x0, x1)
+            except Exception:
+                goci_full = None
+                goci_label = "GOCI read failed"
+        else:
+            goci_label = "GOCI not found"
+
+        goci_raw = goci_full if goci_full is not None else np.zeros_like(lr_np)
+
         patch_base = os.path.splitext(os.path.basename(name))[0]
         out_png_compact = os.path.join(split_dir, f"{patch_base}_compare_compact.png")
         try:
@@ -645,13 +656,13 @@ def eval_subset(ds_subset, split_name: str, model, device):
                 sr_np,
                 hr_np,
                 BAND_LABELS,
-                col_texts=("GOCI-II", "Interpolated GOCI", "Super Resolution", "Landsat"),
-                goci_roi_box=None,
+                col_texts=(goci_label, "Interpolated GOCI", "Super Resolution", "Landsat"),
+                goci_roi_box=roi_box,
             )
             saved += 1
         except Exception:
             out_png = os.path.join(split_dir, f"{patch_base}_compare_4col.png")
-            save_four_col_figure(out_png, goci_raw, lr_np, sr_np, hr_np, BAND_LABELS, patch_base)
+            save_four_col_figure(out_png, goci_raw, lr_np, sr_np, hr_np, BAND_LABELS, scene_core)
             saved += 1
         # SR metrics only
         try:
@@ -688,271 +699,39 @@ def main():
         print(f"权重文件: {WEIGHTS}")
         print(f"LR_DIR: {LR_DIR}\nHR_DIR: {HR_DIR}")
         print(f"保存目录: {SAVE_DIR}")
-        print(f"VAL_SPLIT: {VAL_SPLIT} (使用与训练一致的 split_dataset 随机划分)")
+#         print(f"VAL_SPLIT: {VAL_SPLIT} (使用与训练一致的 split_dataset 随机划分)")
         print(f"EVAL_LOG_EVERY: {EVAL_LOG_EVERY}")
         print("============================================")
     model = create_model(in_channels=5, out_channels=5).to(device)
     load_checkpoint(model, WEIGHTS, map_location=device)
     model.eval()
 
-    # 使用与训练一致的随机划分，并分别评估 train/val（输出分开存放）
+    # Three-way split with fixed seed
+    set_seed(SPLIT_SEED)
     ds_full = PairTifDataset(lr_dir=LR_DIR, hr_dir=HR_DIR, require_bands=5)
-    full_len = len(ds_full)
-    train_ds, val_ds = split_dataset(ds_full, VAL_SPLIT)
+    total_n = len(ds_full)
+    train_n = int(total_n * TRAIN_RATIO)
+    val_n = int(total_n * VAL_RATIO)
+    holdout_n = total_n - train_n - val_n
+    from torch.utils.data import random_split
+    train_ds, val_ds, holdout_ds = random_split(
+        ds_full,
+        [train_n, val_n, holdout_n],
+        generator=torch.Generator().manual_seed(SPLIT_SEED)
+    )
     if PRINT_CONFIG:
-        print(f"完整数据集样本数: {full_len} | 训练: {len(train_ds)} | 验证: {len(val_ds)}")
-        try:
-            preview = [os.path.basename(p[0]) for p in ds_full.files[:5]]
-            print("样本预览:", preview)
-        except Exception:
-            pass
+        print(f"训练集样本数: {len(train_ds)} | 验证集样本数: {len(val_ds)} | 保留集样本数: {len(holdout_ds)}")
+        print("说明: 保留集(holdout)未参与当前训练与验证, 可在单独脚本中做最终评估。")
     os.makedirs(SAVE_DIR, exist_ok=True)
     eval_subset(train_ds, 'train', model, device)
     eval_subset(val_ds, 'val', model, device)
+    eval_subset(holdout_ds, 'holdout', model, device)
     print(f"总耗时: {time.time()-t0:.2f} 秒 | 输出目录: {SAVE_DIR}")
     return
 
-    ds_full = PairTifDataset(lr_dir=LR_DIR, hr_dir=HR_DIR, require_bands=5)
-    full_len = len(ds_full)
-    # 与训练相同的随机划分（使用 main.split_dataset 内置种子）
-    train_ds, ds = split_dataset(ds_full, VAL_SPLIT)
-    eval_len = len(ds)
-    if PRINT_CONFIG:
-        print(f"完整数据集样本数: {full_len} | 验证子集样本数(本次评估): {eval_len}")
-        try:
-            preview = [os.path.basename(p[0]) for p in ds_full.files[:3]]
-            print("前 3 个样本预览:", preview)
-        except Exception:
-            pass
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    # Prepare metrics CSV
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    if not os.path.exists(METRICS_CSV):
-        with open(METRICS_CSV, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "filename",
-                # means
-                "bicubic_psnr_mean", "sr_psnr_mean",
-                "bicubic_r2_mean", "sr_r2_mean",
-                "bicubic_mape_mean", "sr_mape_mean",
-                # per-band PSNR
-                "bicubic_psnr_b1","bicubic_psnr_b2","bicubic_psnr_b3","bicubic_psnr_b4","bicubic_psnr_b5",
-                "sr_psnr_b1","sr_psnr_b2","sr_psnr_b3","sr_psnr_b4","sr_psnr_b5",
-                # per-band R2
-                "bicubic_r2_b1","bicubic_r2_b2","bicubic_r2_b3","bicubic_r2_b4","bicubic_r2_b5",
-                "sr_r2_b1","sr_r2_b2","sr_r2_b3","sr_r2_b4","sr_r2_b5",
-                # per-band MAPE
-                "bicubic_mape_b1","bicubic_mape_b2","bicubic_mape_b3","bicubic_mape_b4","bicubic_mape_b5",
-                "sr_mape_b1","sr_mape_b2","sr_mape_b3","sr_mape_b4","sr_mape_b5",
-            ])
-
-    saved = 0
-    skipped_no_bbox = 0
-    # 汇总整体平均指标（SR 与 Bicubic）
-    all_sr_psnr_means = []
-    all_bic_psnr_means = []
-    all_sr_r2_means = []
-    all_bic_r2_means = []
-    all_sr_mape_means = []
-    all_bic_mape_means = []
-
-    for i in tqdm(range(len(ds)), desc="eval-4col"):
-        lr_t, hr_t, name = ds[i]
-        lr_t = lr_t.unsqueeze(0).to(device)
-        hr_t = hr_t.unsqueeze(0).to(device)
-        sr = model(lr_t)
-
-        sr_np = sr.squeeze(0).cpu().numpy()
-        hr_np = hr_t.squeeze(0).cpu().numpy()
-        lr_np = lr_t.squeeze(0).cpu().numpy()
-
-        # Find GOCI original and read ROI by patch bounds (WGS84)
-        scene_core = scene_id_from_patch_name(name)
-        nc_path = find_nc_for_scene(GOCI_ORI_ROOT, scene_core)
-        if VERBOSE_SKIP_LOG:
-            if nc_path:
-                tqdm.write(f"[info] using GOCI nc: {nc_path}")
-            else:
-                tqdm.write(f"[warn] GOCI nc not found for scene={scene_core}")
-        # get LR patch absolute path
-        try:
-            # 兼容 Subset：从底层数据集中取对应文件路径
-            if hasattr(ds, 'files'):
-                lr_full, _ = ds.files[i]
-            elif hasattr(ds, 'dataset') and hasattr(ds, 'indices') and hasattr(ds.dataset, 'files'):
-                lr_full, _ = ds.dataset.files[ds.indices[i]]
-            else:
-                raise AttributeError('dataset has no files mapping')
-        except Exception:
-            lr_full = os.path.join(LR_DIR, os.path.basename(name))
-        try:
-            bbox_wgs84, crs_str = get_patch_bounds_wgs84(lr_full)
-        except Exception:
-            bbox_wgs84 = None
-
-        # Read GOCI full scene + lat/lon (do not crop); compute ROI indices to limit display
-        # Attempt to read GOCI, but do not abort the figure if it fails.
-        goci_full = None
-        roi_box = None
-        goci_label = "GOCI-II"
-        if bbox_wgs84 is None:
-            if VERBOSE_SKIP_LOG:
-                tqdm.write(f"[warn] no bbox for file={lr_full}; cannot window GOCI display")
-            skipped_no_bbox += 1
-        if nc_path is not None:
-            try:
-                goci_full, goci_lat, goci_lon = read_nc_full_and_latlon(nc_path)
-                if bbox_wgs84 is not None:
-                    y0, y1, x0, x1 = roi_indices_from_latlon(goci_lat, goci_lon, bbox_wgs84)
-                    roi_box = (y0, y1, x0, x1)
-                if VERBOSE_SKIP_LOG:
-                    tqdm.write(f"[ok] GOCI read; roi={roi_box}")
-            except Exception as e:
-                if VERBOSE_SKIP_LOG:
-                    tqdm.write(f"[warn] read nc or roi failure for scene={scene_core}: {type(e).__name__}: {e}")
-                goci_label = "GOCI read failed"
-        else:
-            goci_label = "GOCI not found"
-
-        # Column-1: GOCI full (if available) with display window limited to ROI
-        # If not available, fall back to zeros with same shape as LR for rendering, with label changed.
-        if goci_full is None:
-            # Form a blank canvas with same HxW as LR for consistent tiling
-            goci_raw = np.zeros_like(lr_np)
-        else:
-            goci_raw = goci_full
-        # Column-2: use the LR TIFF patch directly (no interpolation in eval)
-        bicubic_np = lr_np
-        target_c, target_h, target_w = sr_np.shape
-
-        title = scene_core
-        if bbox_wgs84 is not None:
-            xmin, ymin, xmax, ymax = bbox_wgs84
-            title += f" | WGS84 [{xmin:.5f},{ymin:.5f}]–[{xmax:.5f},{ymax:.5f}]"
-
-        # Use patch filename to avoid overwrite across patches in same scene
-        patch_base = os.path.splitext(os.path.basename(name))[0]
-        # Save compact 4-column figure (tiny gaps, labels inside)
-        out_png_compact = os.path.join(SAVE_DIR, f"{patch_base}_compare_compact.png")
-        try:
-            save_compact_fourcol_subplot(
-                out_png_compact,
-                goci_raw,
-                bicubic_np,
-                sr_np,
-                hr_np,
-                BAND_LABELS,
-                col_texts=(goci_label, "Interpolated GOCI", "Super Resolution", "Landsat"),
-                goci_roi_box=roi_box,
-            )
-            saved += 1
-        except Exception:
-            # fallback to previous 4-col figure if compact fails for any reason
-            out_png = os.path.join(SAVE_DIR, f"{patch_base}_compare_4col.png")
-            save_four_col_figure(out_png, goci_raw, bicubic_np, sr_np, hr_np, BAND_LABELS, title)
-            saved += 1
-
-        # Compute per-band metrics (PSNR/R2/MAPE for bicubic vs HR, SR vs HR) and append to CSV
-        try:
-            nb = int(min(5, bicubic_np.shape[0], sr_np.shape[0], hr_np.shape[0]))
-            bic_psnrs = []
-            sr_psnrs = []
-            bic_r2s = []
-            sr_r2s = []
-            bic_mapes = []
-            sr_mapes = []
-            for bi in range(nb):
-                b_bic = bicubic_np[bi]
-                b_sr = sr_np[bi]
-                b_hr = hr_np[bi]
-                # PSNR
-                bic_psnrs.append(_psnr_np(b_bic, b_hr))
-                sr_psnrs.append(_psnr_np(b_sr, b_hr))
-                # R2
-                bic_r2s.append(_r2_np(b_bic, b_hr))
-                sr_r2s.append(_r2_np(b_sr, b_hr))
-                # MAPE
-                bic_mapes.append(_mape_np(b_bic, b_hr))
-                sr_mapes.append(_mape_np(b_sr, b_hr))
-            # pad to length 5 for consistent columns
-            while len(bic_psnrs) < 5:
-                bic_psnrs.append(float('nan'))
-            while len(sr_psnrs) < 5:
-                sr_psnrs.append(float('nan'))
-            while len(bic_r2s) < 5:
-                bic_r2s.append(float('nan'))
-            while len(sr_r2s) < 5:
-                sr_r2s.append(float('nan'))
-            while len(bic_mapes) < 5:
-                bic_mapes.append(float('nan'))
-            while len(sr_mapes) < 5:
-                sr_mapes.append(float('nan'))
-
-            mean_bic_psnr = float(np.nanmean(bic_psnrs))
-            mean_sr_psnr = float(np.nanmean(sr_psnrs))
-            mean_bic_r2 = float(np.nanmean(bic_r2s))
-            mean_sr_r2 = float(np.nanmean(sr_r2s))
-            mean_bic_mape = float(np.nanmean(bic_mapes))
-            mean_sr_mape = float(np.nanmean(sr_mapes))
-
-            # 累积整体统计
-            all_bic_psnr_means.append(mean_bic_psnr)
-            all_sr_psnr_means.append(mean_sr_psnr)
-            all_bic_r2_means.append(mean_bic_r2)
-            all_sr_r2_means.append(mean_sr_r2)
-            all_bic_mape_means.append(mean_bic_mape)
-            all_sr_mape_means.append(mean_sr_mape)
-
-            if (i % EVAL_LOG_EVERY) == 0:
-                tqdm.write(
-                    f"[eval] idx={i}/{eval_len} file={os.path.basename(name)} "
-                    f"bicPSNR={mean_bic_psnr:.2f} srPSNR={mean_sr_psnr:.2f} "
-                    f"bicR2={mean_bic_r2:.3f} srR2={mean_sr_r2:.3f} "
-                    f"bicMAPE={mean_bic_mape:.1f}% srMAPE={mean_sr_mape:.1f}%"
-                )
-
-            with open(METRICS_CSV, "a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    os.path.basename(name),
-                    # means
-                    mean_bic_psnr, mean_sr_psnr,
-                    mean_bic_r2, mean_sr_r2,
-                    mean_bic_mape, mean_sr_mape,
-                    # per-band
-                    *[float(x) for x in bic_psnrs[:5]],
-                    *[float(x) for x in sr_psnrs[:5]],
-                    *[float(x) for x in bic_r2s[:5]],
-                    *[float(x) for x in sr_r2s[:5]],
-                    *[float(x) for x in bic_mapes[:5]],
-                    *[float(x) for x in sr_mapes[:5]],
-                ])
-        except Exception as e:
-            if VERBOSE_SKIP_LOG:
-                tqdm.write(f"[warn] failed to write metrics CSV for {name}: {type(e).__name__}: {e}")
-    if VERBOSE_SKIP_LOG:
-        tqdm.write(f"[summary] saved_figures={saved}, no_bbox={skipped_no_bbox}")
-
-    # 输出整体平均统计
-    def _safe_mean(lst):
-        arr = np.array(lst, dtype=float)
-        if arr.size == 0:
-            return float('nan')
-        return float(np.nanmean(arr))
-
-    global_summary = {
-        'bic_psnr_mean_over_images': _safe_mean(all_bic_psnr_means),
-        'sr_psnr_mean_over_images': _safe_mean(all_sr_psnr_means),
-        'bic_r2_mean_over_images': _safe_mean(all_bic_r2_means),
-        'sr_r2_mean_over_images': _safe_mean(all_sr_r2_means),
-        'bic_mape_mean_over_images': _safe_mean(all_bic_mape_means),
-        'sr_mape_mean_over_images': _safe_mean(all_sr_mape_means),
-    }
-    print("===== 全局评估平均指标 (逐影像平均再求整体平均) =====")
-    for k, v in global_summary.items():
-        print(f"{k}: {v:.4f}")
-    print(f"总耗时: {time.time()-t0:.2f} 秒")
-
 if __name__ == "__main__":
     main()
+
+
+
+
